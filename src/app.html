@@ -862,17 +862,29 @@ function haptic(kind = 'light') {
 }
 const blobToBase64 = (b) => new Promise((ok, bad) => { const r = new FileReader(); r.onload = () => ok(String(r.result).split(',')[1]); r.onerror = bad; r.readAsDataURL(b); });
 async function shareFile(blob, name, text) {
+  let stage = 'prepare';
   try {
     if (NATIVE) {
-      const w = await N('Filesystem').writeFile({ path: name, data: await blobToBase64(blob), directory: 'CACHE' });
-      await N('Share').share({ title: text, text, files: [w.uri], dialogTitle: text });
+      const FS = N('Filesystem'), SH = N('Share');
+      stage = 'read'; const b64 = await blobToBase64(blob);
+      // the file goes to Android in pieces: one big piece is too much for the bridge on some phones
+      const CH = 512 * 1024;
+      stage = 'write'; await FS.writeFile({ path: name, data: b64.slice(0, CH), directory: 'CACHE' });
+      for (let i = CH; i < b64.length; i += CH) await FS.appendFile({ path: name, data: b64.slice(i, i + CH), directory: 'CACHE' });
+      stage = 'uri'; const { uri } = await FS.getUri({ path: name, directory: 'CACHE' });
+      stage = 'share'; await SH.share({ title: text, files: [uri], dialogTitle: text });
       return;
     }
     const file = new File([blob], name, { type: blob.type });
     if (navigator.canShare?.({ files: [file] })) return await navigator.share({ files: [file], text });
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 4000);
-  } catch (err) { if (!/cancel/i.test(String(err?.message || err))) toast('Could not share this'); }
+  } catch (err) {
+    const msg = String(err?.message || err || '');
+    if (/cancel/i.test(msg)) return;
+    console.warn('share failed at', stage, err);
+    toast(`Sharing failed (${stage}): ${msg.slice(0, 80)}`);
+  }
 }
 let wake = null;
 async function keepAwake(on) {
@@ -1233,14 +1245,21 @@ function withGPano(jpegBytes, W, H) {
   out.set(jpegBytes.subarray(0, at)); out.set(seg, at); out.set(jpegBytes.subarray(at), at + seg.length);
   return out;
 }
+let sharing = false;
 async function share360(p) {
-  const c = await getPano(p);
-  // the viewer's front (u = .75) becomes the photo's centre so apps open it facing the right way
-  const r = canvas(c.width, c.height), x = r.getContext('2d'), sh = c.width * .25;
-  x.drawImage(c, -sh, 0); x.drawImage(c, c.width - sh, 0);
-  const blob = await new Promise((ok) => r.toBlob(ok, 'image/jpeg', .9));
-  const bytes = withGPano(new Uint8Array(await blob.arrayBuffer()), c.width, c.height);
-  await shareFile(new Blob([bytes], { type: 'image/jpeg' }), `portal-${p.id}.jpg`, p.title);
+  if (sharing) return; sharing = true;
+  toast('Preparing the 360 photo…'); haptic();
+  try {
+    await new Promise((r) => setTimeout(r, 50));
+    const c = await getPano(p);
+    // the viewer's front (u = .75) becomes the photo's centre so apps open it facing the right way
+    const W = Math.min(4096, c.width), H = W / 2, r = canvas(W, H), x = r.getContext('2d'), sh = W * .25;
+    x.drawImage(c, -sh, 0, W, H); x.drawImage(c, W - sh, 0, W, H);
+    const blob = await new Promise((ok) => r.toBlob(ok, 'image/jpeg', .86)); free(r);
+    const bytes = withGPano(new Uint8Array(await blob.arrayBuffer()), W, H);
+    await shareFile(new Blob([bytes], { type: 'image/jpeg' }), `portal-${p.id}.jpg`, p.title);
+  } catch (err) { toast('Could not prepare the photo'); console.warn(err); }
+  finally { sharing = false; }
 }
 
 /* =====================================================================
@@ -1655,7 +1674,7 @@ function openClip(blob) {
     <button class="btn btn-ghost" id="clipReel" style="width:100%">🎬 Add to my Reels</button>
     <button class="btn btn-ghost" id="clipClose" style="width:100%">Done</button></div>`;
   $('clipClose').onclick = () => { URL.revokeObjectURL(url); closeModal(); };
-  $('clipShare').onclick = () => shareFile(blob, `portal-${p.id}.${ext}`, p.title);
+  $('clipShare').onclick = () => { toast('Preparing the video…'); shareFile(blob, `portal-${p.id}.${ext}`, p.title); };
   $('clipReel').onclick = () => { postReel(p); closeModal(); };
 }
 
@@ -2576,6 +2595,9 @@ const HE = {
   "Turn right → follow the arrow": "להסתובב ימינה ← לפי החץ",
   "← Turn left, follow the arrow": "להסתובב שמאלה לפי החץ →",
   "Almost there, aim at the dot": "כמעט, לכוון לנקודה",
+  "Preparing the 360 photo…": "מכינים את תמונת ה-360…",
+  "Preparing the video…": "מכינים את הסרטון…",
+  "Could not prepare the photo": "לא הצלחנו להכין את התמונה",
   "visit": "ביקור",
   "visits": "ביקורים",
   "story": "סטורי",
@@ -2671,7 +2693,7 @@ const HE = {
 };
 const HE_RX = [
   [/^(\d+) portals?$/, '$1 פורטלים'], [/^Horizon (\d+)\/(\d+)$/, 'אופק $1/$2'], [/^Sky (\d+)\/(\d+)$/, 'שמיים $1/$2'], [/^Ground (\d+)\/(\d+)$/, 'קרקע $1/$2'], [/^Top (\d+)\/(\d+)$/, 'למעלה $1/$2'],
-  [/^Blurred (\d+) faces?$/, 'טושטשו $1 פנים'], [/^Stitching (\d+)\/(\d+)$/, 'מחברים $1/$2'], [/^Tap the spot for (.+)$/, (m, w) => `לבחור נקודה ל${w === 'your comment' ? 'תגובה שלך' : w === 'your story' ? 'סטורי שלך' : w}`],
+  [/^Sharing failed \((\w+)\): (.*)$/, 'השיתוף נכשל ($1): $2'], [/^Blurred (\d+) faces?$/, 'טושטשו $1 פנים'], [/^Stitching (\d+)\/(\d+)$/, 'מחברים $1/$2'], [/^Tap the spot for (.+)$/, (m, w) => `לבחור נקודה ל${w === 'your comment' ? 'תגובה שלך' : w === 'your story' ? 'סטורי שלך' : w}`],
   [/^Welcome, (.+) ✨$/, 'ברוכים הבאים, $1 ✨'], [/^You stepped through to (.+)$/, 'עברת ל$1'], [/^Delete “(.+)”\?$/, 'למחוק את “$1”?'],
   [/^(\d+) comments?$/, '$1 תגובות'], [/^(\d+) stor(y|ies)$/, '$1 סטוריז'], [/^(\d+) visits?$/, '$1 ביקורים'],
 ];
