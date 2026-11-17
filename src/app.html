@@ -1316,8 +1316,8 @@ function matches(p) {
 }
 const thumbs = new Map();
 function renderCards() {
-  const list = all().filter(matches).sort((a, b) => (b.live - a.live) || (b.mine ? 1 : 0) - (a.mine ? 1 : 0));
-  if ((filter === 'all' || filter === 'live') && matches(CLASH)) list.unshift(CLASH);
+  const list = all().filter(matches).sort((a, b) => ((b.mine ? 1 : 0) - (a.mine ? 1 : 0)) || (b.live - a.live));
+  if ((filter === 'all' || filter === 'live') && matches(CLASH)) list.splice(list[0]?.mine ? 1 : 0, 0, CLASH);
   for (const m of markers.values()) m.el.dataset.f = matches(m.p) ? '' : 'out';
   $('trayTitle').textContent = filter === 'live' ? 'Live right now' : filter === 'mine' ? 'Your portals' : filter === 'following' ? 'Portals you follow' : 'Step into somewhere';
   if (!list.length) { $('cards').innerHTML = `<p class="empty">${filter === 'mine' ? 'You have not opened a portal yet. Tap ＋ to open one.' : filter === 'following' ? 'Follow a portal to see it here and know when they go live.' : 'No portals match that.'}</p>`; return; }
@@ -2327,6 +2327,7 @@ function cameraDirection(e) {
   return { heading: Math.atan2(X, Y) / DEG, pitch: Math.asin(THREE.MathUtils.clamp(Z, -1, 1)) / DEG };
 }
 const angDiff = (a, b) => ((a - b + 540) % 360) - 180;
+function onCamMotion(e) { const r = e.rotationRate; if (cam && r) cam.spin = Math.hypot(r.alpha || 0, r.beta || 0, r.gamma || 0); }
 function onCamOri(e) {
   if (!cam || e.alpha == null || e.beta == null) return;
   const d = cameraDirection(e);
@@ -2336,7 +2337,7 @@ function onCamOri(e) {
 function stopCamera() {
   if (!cam) return;
   cam.stream?.getTracks().forEach((t) => t.stop());
-  removeEventListener('deviceorientation', onCamOri);
+  removeEventListener('deviceorientation', onCamOri); removeEventListener('devicemotion', onCamMotion);
   cam = null;
 }
 async function startCapture() {
@@ -2357,18 +2358,20 @@ async function startCapture() {
   await video.play().catch(() => {});
   const out = canvas(PANO_W, PANO_W / 2), octx = out.getContext('2d');
   cam = { stream, video, out, octx, done: new Set(), h0: null, heading: 0, pitch: 0, sensors: false, minY: out.height, maxY: 0, faces: 0 };
-  addEventListener('deviceorientation', onCamOri);
+  addEventListener('deviceorientation', onCamOri); addEventListener('devicemotion', onCamMotion);
   step('capture'); runViewfinder();
 }
 $('startCapture').addEventListener('click', startCapture);
 
 // paint the centre of the current camera frame into the panorama at slot i
+let ALIGN = true;
 function paintSlot(i, pitch) {
   const { video, out, octx } = cam, vw = video.videoWidth, vh = video.videoHeight, W = out.width, H = out.height;
   if (!vw || !vh) return false;
   const long = Math.max(vw, vh), tanL = Math.tan(LONG_FOV / 2 * DEG);
   const hfov = 2 * Math.atan(tanL * vw / long) / DEG, vfov = 2 * Math.atan(tanL * vh / long) / DEG;
-  const span = Math.min(hfov, SLOT_DEG + 10), feather = 5;
+  // each slice is wider than its 15° so neighbours overlap; the overlap is what we align and blend on
+  const span = Math.min(hfov, SLOT_DEG + 14), feather = Math.min(7, span / 4);
   const sw = vw * span / hfov, sx = (vw - sw) / 2;
   const strip = canvas(Math.round(sw), vh), s = strip.getContext('2d');
   s.drawImage(video, sx, 0, sw, vh, 0, 0, strip.width, vh);
@@ -2379,10 +2382,48 @@ function paintSlot(i, pitch) {
   const gy = s.createLinearGradient(0, 0, 0, vh); gy.addColorStop(0, 'rgba(0,0,0,0)'); gy.addColorStop(.06, '#000'); gy.addColorStop(.94, '#000'); gy.addColorStop(1, 'rgba(0,0,0,0)');
   s.fillStyle = gy; s.fillRect(0, 0, strip.width, vh);
   const u = .75 + (i * SLOT_DEG) / 360, dw = span / 360 * W, dh = vfov / 180 * H;
-  const cx = ((u * W) % W), cy = H * (.5 - pitch / 180), x0 = cx - dw / 2, y0 = cy - dh / 2;
+  let x0 = (u * W) % W - dw / 2, y0 = H * (.5 - pitch / 180) - dh / 2;
+  // the sensors drift a degree or two: slide the slice until it matches what is already painted
+  const fix = ALIGN && cam.done.size ? alignStrip(strip, x0, y0, dw, dh) : null;
+  if (fix) { x0 += fix.dx; y0 += fix.dy; }
+  octx.save();
+  if (fix && Math.abs(fix.gain - 1) > .01) octx.filter = `brightness(${fix.gain})`;
   for (const off of [0, -W, W]) octx.drawImage(strip, x0 + off, y0, dw, dh);
+  octx.restore();
   cam.minY = Math.min(cam.minY, y0 + dh * .06); cam.maxY = Math.max(cam.maxY, y0 + dh * .94);
   return true;
+}
+// Finds the shift (and brightness) that best fits the new slice onto the painted panorama.
+// Coarse search at 1/8 size, then a fine one at 1/2 size around the best coarse answer.
+function alignStrip(strip, x0, y0, dw, dh) {
+  const out = cam.out, W = out.width, H = out.height;
+  const search = (k, cx, cy, mx, my) => {
+    const sw = Math.max(4, Math.round(dw * k)), sh = Math.max(4, Math.round(dh * k));
+    const a = canvas(sw, sh), ac = a.getContext('2d', { willReadFrequently: true }); ac.drawImage(strip, 0, 0, sw, sh);
+    const bw = sw + 2 * mx, bh = sh + 2 * my, b = canvas(bw, bh), bc = b.getContext('2d', { willReadFrequently: true });
+    const ox = x0 + cx - mx / k, oy = y0 + cy - my / k;
+    for (const off of [0, -W, W]) bc.drawImage(out, ox + off, oy, bw / k, bh / k, 0, 0, bw, bh);
+    const A = ac.getImageData(0, 0, sw, sh).data, B = bc.getImageData(0, 0, bw, bh).data;
+    const LA = new Float32Array(sw * sh), LB = new Float32Array(bw * bh);
+    for (let i = 0, j = 0; i < A.length; i += 4, j++) LA[j] = A[i + 3] > 40 ? A[i] * .3 + A[i + 1] * .59 + A[i + 2] * .11 : -1;
+    for (let i = 0, j = 0; i < B.length; i += 4, j++) LB[j] = B[i + 3] > 40 ? B[i] * .3 + B[i + 1] * .59 + B[i + 2] * .11 : -1;
+    let best = null;
+    for (let dy = -my; dy <= my; dy++) for (let dx = -mx; dx <= mx; dx++) {
+      let n = 0, sa = 0, sb = 0, saa = 0, sab = 0, sbb = 0;
+      for (let y = 0; y < sh; y++) {
+        const ra = y * sw, rb = (y + my + dy) * bw + mx + dx;
+        for (let x = 0; x < sw; x++) { const la = LA[ra + x]; if (la < 0) continue; const lb = LB[rb + x]; if (lb < 0) continue; n++; sa += la; sb += lb; saa += la * la; sab += la * lb; sbb += lb * lb; }
+      }
+      if (n < sw * sh * .08 || sa < 1) continue;
+      const g = Math.min(1.25, Math.max(.8, sb / sa));
+      const e = (sbb - 2 * g * sab + g * g * saa) / n * (1 + .004 * (dx * dx + dy * dy));
+      if (!best || e < best.e) best = { e, dx, dy, g };
+    }
+    return best && { dx: cx + best.dx / k, dy: cy + best.dy / k, gain: best.g };
+  };
+  const coarse = search(1 / 8, 0, 0, Math.round(4 / 360 * W / 8), Math.round(3 / 180 * H / 8));
+  if (!coarse) return null;
+  return search(1 / 2, coarse.dx, coarse.dy, 5, 5) || coarse;
 }
 
 function nextSlot() { for (let i = 0; i < SLOTS_N; i++) if (!cam.done.has(i)) return i; return -1; }
@@ -2407,7 +2448,7 @@ function runViewfinder() {
       const i = nextSlot(), rel = angDiff(cam.heading, cam.h0);
       dy = cam.pitch;
       // any missing slot the camera is pointing at right now gets painted
-      for (let k = 0; k < SLOTS_N; k++) if (!cam.done.has(k) && Math.abs(angDiff(rel, k * SLOT_DEG)) < 3.5 && Math.abs(cam.pitch) < 14 && paintSlot(k, cam.pitch)) markSlot(k);
+      for (let k = 0; k < SLOTS_N; k++) if (!cam.done.has(k) && Math.abs(angDiff(rel, k * SLOT_DEG)) < 4 && Math.abs(cam.pitch) < 14 && !(cam.spin > 35) && paintSlot(k, cam.pitch)) markSlot(k);
       if (i >= 0) dx = angDiff(i * SLOT_DEG, rel);
       $('vfText').textContent = Math.abs(cam.pitch) > 14 ? (cam.pitch > 0 ? 'Tilt the phone down a little' : 'Tilt the phone up a little') : cam.done.size === SLOTS_N ? 'Full circle ✓' : dx > 6 ? 'Keep turning slowly →' : dx < -6 ? '← Turn back a little' : 'Hold steady…';
     }
