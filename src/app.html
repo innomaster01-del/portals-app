@@ -1900,7 +1900,7 @@ const mul = (R, d) => [R[0] * d[0] + R[1] * d[1] + R[2] * d[2], R[3] * d[0] + R[
 const headingOf = (R) => { const f = mul(R, [0, 0, -1]); return { heading: Math.atan2(f[0], f[1]) / DEG, pitch: Math.asin(THREE.MathUtils.clamp(f[2], -1, 1)) / DEG }; };
 const angDiff = (a, b) => ((a - b + 540) % 360) - 180;
 const worldDir = (heading, pitch) => { const h = heading * DEG, p = pitch * DEG; return [Math.cos(p) * Math.sin(h), Math.cos(p) * Math.cos(h), Math.sin(p)]; };
-function onCamOri(e) { if (!cam || e.alpha == null || e.beta == null) return; cam.R = rotationOf(e); cam.sensors = true; }
+function onCamOri(e) { if (!cam || e.alpha == null || e.beta == null) return; cam.Rs = rotationOf(e); cam.R = mat3m(cam.D || [1, 0, 0, 0, 1, 0, 0, 0, 1], cam.Rs); cam.sensors = true; }
 function onCamMotion(e) { const r = e.rotationRate; if (cam && r) cam.spin = Math.hypot(r.alpha || 0, r.beta || 0, r.gamma || 0); }
 function stopCamera() {
   if (!cam) return;
@@ -1921,7 +1921,7 @@ async function startCapture() {
   await video.play().catch(() => {});
   const targets = ROWS.flatMap((r, ri) => Array.from({ length: r.n }, (_, k) => ({ row: ri, yaw: k * 360 / r.n, pitch: r.pitch, done: false })));
   if (store.get('fov', 0)) LONG_FOV = store.get('fov', 66);
-  cam = { raw: [], pending: [], dark: false, full: false, paused: false, stream, video, targets, h0: null, R: null, sensors: false, spin: 0, started: false, still: 0, lastShot: 0, shots: 0 };
+  cam = { D: [1, 0, 0, 0, 1, 0, 0, 0, 1], raw: [], pending: [], dark: false, full: false, paused: false, stream, video, targets, h0: null, R: null, sensors: false, spin: 0, started: false, still: 0, lastShot: 0, shots: 0 };
   addEventListener('deviceorientation', onCamOri); addEventListener('devicemotion', onCamMotion);
   autoCamera(stream); keepAwake(true);
   step('capture'); runViewfinder();
@@ -2065,8 +2065,32 @@ function takeShot(target) {
   const small = qx.getImageData(0, 0, qw, qh), px = small.data;
   let sum = 0; for (let i = 0; i < px.length; i += 4 * 7) sum += px[i] + px[i + 1] + px[i + 2];
   cam.dark = sum / (px.length / (4 * 7)) / 3 < 45;           // in the dark the phone must be held stiller
-  const ti = cam.targets.indexOf(target), R = cam.R.slice();
-  const shot = { R, row: target.row, yaw: target.yaw, ti, blob: null, small, sharp: sharpness(small), ok: true, mini: warpShot(small, R, cam.h0, LONG_FOV, 512) };
+  const ti = cam.targets.indexOf(target), R = (cam.Rs || cam.R).slice();
+  // match this photo with the photos around it right away: tells how far the compass is off, so the next
+  // dots are placed by the picture itself (near metal, like a fridge, the compass can be off by tens of degrees)
+  let Rc = mat3m(cam.D, R), F = window.jsfeat ? extractFeatures(small, 600) : null, linked = !F, expect = false;
+  if (F) {
+    let best = null;
+    for (const p of cam.raw) {
+      if (!p.ok || !p.F) continue;
+      const cosang = dot3(mat3v(p.Rc, [0, 0, -1]), mat3v(Rc, [0, 0, -1]));
+      if (cosang > Math.cos(45 * DEG)) expect = true;
+      if (cosang < Math.cos(70 * DEG)) continue;
+      const m = matchPair(p.F, F, p.Rc, Rc, LONG_FOV);
+      if (m.length > (best ? best.length : 0)) best = m;
+    }
+    if (best) {
+      linked = true;
+      // only a real jump (more than 8 degrees) is corrected live; small differences can come from the lens
+      // not being measured yet and are left to the final alignment, which measures it
+      // a compass error is a turn around the vertical only (tilt comes from gravity, which is reliable), so the
+      // live fix is a pure sideways turn, and only when the match is strong and agrees on the tilt
+      const Q = best.Q, tilt = Math.acos(Math.min(1, Q[8])) / DEG, yaw = Math.atan2(Q[3], Q[0]) / DEG;
+      if (best.length >= 20 && tilt < 2.5 && Math.abs(yaw) > 8) { const C = expRot([0, 0, -yaw * DEG]); Rc = mat3m(C, Rc); cam.D = mat3m(C, cam.D); }
+    }
+  }
+  if (F && !linked && expect && !target.overlapTried) { target.overlapTried = true; cam.lastShot = performance.now() + 900; return 'overlap'; }
+  const shot = { R, Rc, F, row: target.row, yaw: target.yaw, ti, blob: null, small, sharp: sharpness(small), ok: true, mini: warpShot(small, Rc, cam.h0, LONG_FOV, 512) };
   cam.pending.push(new Promise((ok) => fc.toBlob((b) => { shot.blob = b; ok(); }, 'image/jpeg', .93)));
   cam.shots++; cam.lastShot = performance.now();
   // much blurrier than the other photos in this row? ask once to aim again (a plain wall can look "soft", so only once)
@@ -2180,34 +2204,46 @@ function expRot(w) {
           k[1] * k[0] * v + k[2] * s, c + k[1] * k[1] * v, k[1] * k[2] * v - k[0] * s,
           k[2] * k[0] * v - k[1] * s, k[2] * k[1] * v + k[0] * s, c + k[2] * k[2] * v];
 }
-// matches between two photos: nearest binary descriptor, ratio test, only where the sensors say the
-// two points could be the same direction, then RANSAC on a pure rotation
+// Matches between two photos. The sensors only narrow the search (30 degrees: near metal, like a fridge,
+// the phone's compass can be off by tens of degrees). Nearest binary descriptor both ways, ratio test,
+// then RANSAC on a pure rotation, then a second guided pass with the rotation that was found.
 function matchPair(A, B, Ra, Rb, fov) {
   const fa = focalOf(A.w, A.h, fov), fb = focalOf(B.w, B.h, fov);
   const WA = [], WB = [];
   for (let i = 0; i < A.n; i++) WA.push(mat3v(Ra, rayOf(A.pts[i * 2], A.pts[i * 2 + 1], A.w, A.h, fa)));
   for (let j = 0; j < B.n; j++) WB.push(mat3v(Rb, rayOf(B.pts[j * 2], B.pts[j * 2 + 1], B.w, B.h, fb)));
-  const gate = Math.cos(6 * DEG), cand = [];
+  const ham = (i, j) => { const ai = i * 8, bj = j * 8; let d = 0; for (let k = 0; k < 8; k++) d += popcnt(A.desc[ai + k] ^ B.desc[bj + k]); return d; };
+  const gate = Math.cos(30 * DEG), bestA = new Int32Array(A.n).fill(-1), bestB = new Int32Array(B.n).fill(-1), dB = new Int32Array(B.n).fill(999), cand = [];
   for (let i = 0; i < A.n; i++) {
-    let best = 999, second = 999, bj = -1; const ai = i * 8;
+    let best = 999, second = 999, bj = -1;
     for (let j = 0; j < B.n; j++) {
       if (dot3(WA[i], WB[j]) < gate) continue;
-      const bjo = j * 8; let d = 0; for (let k = 0; k < 8; k++) d += popcnt(A.desc[ai + k] ^ B.desc[bjo + k]);
+      const d = ham(i, j);
       if (d < best) { second = best; best = d; bj = j; } else if (d < second) second = d;
+      if (d < dB[j]) { dB[j] = d; bestB[j] = i; }
     }
-    if (bj >= 0 && best < 70 && best < second * .85) cand.push([i, bj]);
+    if (bj >= 0 && best < 64 && best < second * .8) bestA[i] = bj;
   }
+  for (let i = 0; i < A.n; i++) if (bestA[i] >= 0 && bestB[bestA[i]] === i) cand.push([i, bestA[i]]);   // both ways
   if (cand.length < 8) return [];
-  // RANSAC: the correction between the two photos is a small rotation
-  const thr = Math.cos(.6 * DEG); let bestIn = [];
-  for (let it = 0; it < 300; it++) {
+  const thr = Math.cos(1.2 * DEG); let bestQ = null, bestN = 0;
+  for (let it = 0; it < 600; it++) {
     const p = cand[(Math.random() * cand.length) | 0], q = cand[(Math.random() * cand.length) | 0]; if (p === q) continue;
-    if (dot3(WA[p[0]], WA[q[0]]) > Math.cos(1.5 * DEG)) continue;                       // too close together to define a rotation
+    if (dot3(WA[p[0]], WA[q[0]]) > Math.cos(2 * DEG)) continue;
     const Q = triad(WA[p[0]], norm3(WA[q[0]]), WB[p[1]], norm3(WB[q[1]]));
-    const inl = cand.filter(([i, j]) => dot3(mat3v(Q, WA[i]), WB[j]) > thr);
-    if (inl.length > bestIn.length) bestIn = inl;
+    let n = 0; for (const [i, j] of cand) if (dot3(mat3v(Q, WA[i]), WB[j]) > thr) n++;
+    if (n > bestN) { bestN = n; bestQ = Q; }
   }
-  return bestIn.length >= 10 ? bestIn : [];
+  if (!bestQ || bestN < 8) return [];
+  // guided pass: with the rotation known, look again for every point exactly where it should be
+  const g2 = Math.cos(1 * DEG), out = [], usedB = new Uint8Array(B.n);
+  for (let i = 0; i < A.n; i++) {
+    const pa = mat3v(bestQ, WA[i]); let best = 999, bj = -1;
+    for (let j = 0; j < B.n; j++) { if (dot3(pa, WB[j]) < g2) continue; const d = ham(i, j); if (d < best) { best = d; bj = j; } }
+    if (bj >= 0 && best < 80 && !usedB[bj]) { usedB[bj] = 1; out.push([i, bj]); }
+  }
+  out.Q = bestQ;
+  return out.length >= 10 ? out : [];
 }
 function solveLinear(H, g) {   // Gaussian elimination with partial pivoting; H is n x n (array of rows), solves H x = g
   const n = g.length, M = H.map((r, i) => [...r, g[i]]);
@@ -2224,7 +2260,7 @@ function solveLinear(H, g) {   // Gaussian elimination with partial pivoting; H 
 // Bundle adjustment ("ray" cost, as in OpenCV): every matched point must point the same way from both
 // photos. Unknowns: a small rotation for every photo and the lens field of view. A weak pull towards the
 // sensor rotations keeps the horizon level.
-function bundleAdjust(F, Rs0, pairs, fov0) {
+function bundleAdjust(F, Rs0, pairs, fov0, fixFocal = false) {
   const N = F.length, P = 3 * N + 1, Rs = Rs0.map((R) => R.slice()), Om = Array.from({ length: N }, () => [0, 0, 0]);
   let lf = Math.log(focalOf(1, 1, fov0)), lambda = 1e-3;
   const obs = []; for (const pr of pairs) { const m = pr.m.length > 90 ? pr.m.filter((_, k) => k % Math.ceil(pr.m.length / 90) === 0) : pr.m; for (const [i, j] of m) obs.push([pr.a, i, pr.b, j]); }
@@ -2232,13 +2268,13 @@ function bundleAdjust(F, Rs0, pairs, fov0) {
   const HUB = 3 / (Math.exp(lf) * 640), MU = 1;
   const cost = (R, lfv) => { let s = 0; for (const [a, i, b, j] of obs) { const r = mat3v(R[a], rays(a, i, lfv)), q = mat3v(R[b], rays(b, j, lfv)), e = Math.hypot(r[0] - q[0], r[1] - q[1], r[2] - q[2]); s += e < HUB ? e * e : 2 * HUB * e - HUB * HUB; } return s; };
   let cur = cost(Rs, lf);
-  for (let iter = 0; iter < 25; iter++) {
+  for (let iter = 0; iter < 40; iter++) {
     const H = Array.from({ length: P }, () => new Float64Array(P)), g = new Float64Array(P), eps = 1e-5;
     for (const [a, i, b, j] of obs) {
       const da = rays(a, i, lf), db = rays(b, j, lf), va = mat3v(Rs[a], da), vb = mat3v(Rs[b], db);
       const r = [va[0] - vb[0], va[1] - vb[1], va[2] - vb[2]], e = Math.hypot(r[0], r[1], r[2]), w = e < HUB ? 1 : HUB / e;
       const va2 = mat3v(Rs[a], rays(a, i, lf + eps)), vb2 = mat3v(Rs[b], rays(b, j, lf + eps));
-      const Jf = [((va2[0] - vb2[0]) - r[0]) / eps, ((va2[1] - vb2[1]) - r[1]) / eps, ((va2[2] - vb2[2]) - r[2]) / eps];
+      const Jf = fixFocal ? [0, 0, 0] : [((va2[0] - vb2[0]) - r[0]) / eps, ((va2[1] - vb2[1]) - r[1]) / eps, ((va2[2] - vb2[2]) - r[2]) / eps];
       const sk = (v, s) => [[0, -v[2] * s, v[1] * s], [v[2] * s, 0, -v[0] * s], [-v[1] * s, v[0] * s, 0]];
       const Ja = sk(va, -1), Jb = sk(vb, 1);                  // d r / d(rotation of a), d r / d(rotation of b)
       const cols = []; for (let c = 0; c < 3; c++) { cols.push([3 * a + c, [Ja[0][c], Ja[1][c], Ja[2][c]]]); cols.push([3 * b + c, [Jb[0][c], Jb[1][c], Jb[2][c]]]); }
@@ -2246,6 +2282,7 @@ function bundleAdjust(F, Rs0, pairs, fov0) {
       for (const [p, jp] of cols) { g[p] += w * dot3(jp, r); for (const [q, jq] of cols) H[p][q] += w * dot3(jp, jq); }
     }
     for (let k = 0; k < N; k++) for (let c = 0; c < 3; c++) { H[3 * k + c][3 * k + c] += MU; g[3 * k + c] += MU * Om[k][c]; }
+    if (fixFocal) H[P - 1][P - 1] += 1;
     for (let p = 0; p < P; p++) H[p][p] *= 1 + lambda;
     const step = solveLinear(H.map((r) => Array.from(r)), Array.from(g, (v) => -v)); if (!step) break;
     const R2 = Rs.map((R, k) => mat3m(expRot([step[3 * k], step[3 * k + 1], step[3 * k + 2]]), R)), lf2 = lf + step[P - 1];
@@ -2324,12 +2361,13 @@ async function stitchAll(rawAll, h0) {
   let Rs = shots.map((s) => s.R), gains = shots.map(() => 1), engine = false, pairs = [];
   if (window.jsfeat && !window.__noEngine && shots.length >= 2) {
     $('stitchText').textContent = 'Finding matching points'; await nextFrame();
-    const F = shots.map((s) => extractFeatures(s.small));
+    const F = shots.map((s) => s.F || extractFeatures(s.small));
     const fwdOf = (R) => mat3v(R, [0, 0, -1]), sm = shots[0].small, hfov = 2 * Math.atan(Math.tan(LONG_FOV / 2 * DEG) * Math.min(sm.width, sm.height) / Math.max(sm.width, sm.height)) / DEG;
     for (let a = 0; a < shots.length; a++) for (let b = a + 1; b < shots.length; b++) {
-      if (dot3(fwdOf(shots[a].R), fwdOf(shots[b].R)) < Math.cos(Math.min(70, LONG_FOV * .95) * DEG)) continue;
-      const m = matchPair(F[a], F[b], shots[a].R, shots[b].R, LONG_FOV);
-      if (m.length) pairs.push({ a, b, m });
+      const Ra = shots[a].Rc || shots[a].R, Rb = shots[b].Rc || shots[b].R;
+      if (dot3(fwdOf(Ra), fwdOf(Rb)) < Math.cos(Math.min(70, LONG_FOV * .95) * DEG)) continue;
+      const m = matchPair(F[a], F[b], Ra, Rb, LONG_FOV);
+      if (m.length) pairs.push({ a, b, m, Q: m.Q });
       if ((a * shots.length + b) % 6 === 0) await nextFrame();
     }
     // connected photos: the engine is used only if almost every photo found its neighbours
@@ -2337,12 +2375,36 @@ async function stitchAll(rawAll, h0) {
     window.__engine = { pairs: pairs.map((p) => [p.a, p.b, p.m.length]), linked: linked.size, n: shots.length };
     if (linked.size >= Math.max(2, Math.ceil(shots.length * .8)) && pairs.length >= shots.length - 1) {
       $('stitchText').textContent = 'Lining up every photo'; await nextFrame();
-      const ba = bundleAdjust(F, shots.map((s) => s.R), pairs, LONG_FOV);
+      // starting point from the photos themselves: chain the rotations found between matched photos,
+      // strongest links first (a spanning tree), so a wrong compass reading does not matter
+      const C = shots.map(() => null), root = pairs.slice().sort((x, y) => y.m.length - x.m.length)[0].a;
+      C[root] = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+      const T = (M) => [M[0], M[3], M[6], M[1], M[4], M[7], M[2], M[5], M[8]];
+      for (let grown = true; grown;) {
+        grown = false;
+        for (const pr of pairs.slice().sort((x, y) => y.m.length - x.m.length)) {
+          if (C[pr.a] && !C[pr.b]) { C[pr.b] = mat3m(C[pr.a], T(pr.Q)); grown = true; }
+          else if (C[pr.b] && !C[pr.a]) { C[pr.a] = mat3m(C[pr.b], pr.Q); grown = true; }
+        }
+      }
+      const start = shots.map((s, i) => s.Rc || (C[i] ? mat3m(C[i], s.R) : s.R));
+      // the lens is only measured when the horizon circle is closed (every neighbour matched, all the way round);
+      // otherwise the value measured before on this phone is kept
+      const hzI = shots.map((s, i) => i).filter((i) => shots[i].row === 0), has = (x, y) => pairs.some((p) => (p.a === x && p.b === y) || (p.a === y && p.b === x));
+      const closed = hzI.length >= 8 && hzI.every((x, k) => has(x, hzI[(k + 1) % hzI.length]));
+      const known = store.get('fovOk', false) && store.get('fov', 0);
+      if (!closed && known) LONG_FOV = known;
+      const ba = bundleAdjust(F, start, pairs, LONG_FOV, !closed);
+      // level the horizon by gravity (the accelerometer is reliable even where the compass is not)
+      let up = [0, 0, 0]; shots.forEach((s, i) => { const u = mat3v(ba.Rs[i], [s.R[6], s.R[7], s.R[8]]); up[0] += u[0]; up[1] += u[1]; up[2] += u[2]; });
+      up = norm3(up); const ax = cross3(up, [0, 0, 1]), sn = Math.hypot(...ax);
+      if (sn > 1e-9) { const G = expRot(ax.map((v) => v / sn * Math.asin(Math.min(1, sn)))); ba.Rs = ba.Rs.map((R) => mat3m(G, R)); }
+      window.__engine.closed = closed;
       window.__engine.ba = { fov: ba.fov, rms: ba.rms, n: ba.n };
-      if (ba.fov > 45 && ba.fov < 95 && ba.rms < .5) {
+      if (ba.fov > 45 && ba.fov < 95 && ba.rms < .6) {
         Rs = ba.Rs; LONG_FOV = Math.round(ba.fov * 100) / 100; engine = true;
         gains = solveGains(F, pairs);
-        if (hz.length >= 8) { store.set('fov', LONG_FOV); store.set('fovOk', true); }
+        if (closed) { store.set('fov', LONG_FOV); store.set('fovOk', true); }
       }
     }
   }
@@ -2543,6 +2605,7 @@ function runViewfinder() {
           if (cam.still >= (cam.dark ? 14 : 8) && performance.now() - cam.lastShot > 400) {
             const r = takeShot(near);
             if (r === 'blurry') { haptic('heavy'); toast('That one was blurry. Aim again and hold still'); }
+            else if (r === 'overlap') { haptic('heavy'); toast('That one does not overlap the last photo. Aim at the dot again'); }
             else if (r) { near.done = true; haptic('medium'); paintRows(); if (afterShot()) { if (!cam) return; } }
             cam.still = 0;
           }
@@ -2982,6 +3045,7 @@ const HE = {
   "Finding matching points": "מחפשים נקודות משותפות",
   "Lining up every photo": "מיישרים כל תמונה",
   "Choosing the seams": "בוחרים איפה לחבר",
+  "That one does not overlap the last photo. Aim at the dot again": "התמונה לא חופפת לקודמת. לכוון שוב לנקודה",
   "visit": "ביקור",
   "visits": "ביקורים",
   "story": "סטורי",
