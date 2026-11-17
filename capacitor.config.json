@@ -2,5 +2,17 @@
   "appId": "app.portals.live",
   "appName": "Portals",
   "webDir": "www",
-  "backgroundColor": "#04050b"
+  "backgroundColor": "#04050b",
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 700,
+      "launchAutoHide": true,
+      "backgroundColor": "#04050b",
+      "showSpinner": false
+    },
+    "StatusBar": {
+      "style": "DARK",
+      "backgroundColor": "#04050b"
+    }
+  }
 }
