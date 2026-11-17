@@ -838,6 +838,8 @@ const DPR = Math.min(window.devicePixelRatio || 1, 2);
 const ME = { name: 'You', hue: 262, isMe: true, photo: '' };
 const av = (p, cls = '') => `<span class="avatar ${cls}" style="--h:${p.hue ?? 262}">${p.isMe && ME.photo ? `<img src="${ME.photo}" alt="">` : esc([...(p.name || '?')][0])}</span>`;
 const canvas = (w, h) => { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; };
+const bigCanvas = (w, h) => { const c = canvas(w, h); c.getContext('2d', { willReadFrequently: true }); return c; };
+const free = (...cs) => cs.forEach((c) => { if (c) { c.width = 0; c.height = 0; } });
 const PANO_W = (navigator.deviceMemory || 8) < 4 ? 2048 : 4096;
 let mode = 'explore';
 
@@ -1978,11 +1980,16 @@ async function decodeFrame(blob) {
 async function stitchAll(raw, h0) {
   const W = PANO_W, H = W / 2, shots = raw.slice().sort((a, b) => a.row - b.row || a.yaw - b.yaw), hz = shots.filter((s) => s.row === 0);
   if (hz.length >= 8) {
-    $('stitchText').textContent = 'Measuring your camera'; await nextFrame();
-    const fov = measureLens(hz, h0);
-    if (fov && fov > 45 && fov < 95) { LONG_FOV = Math.round(fov * 10) / 10; store.set('fov', LONG_FOV); }
+    // measured before on this phone? check that the circle still closes; measure again only if it does not
+    const known = store.get('fovOk', false) && store.get('fov', 0);
+    const gap = known ? closureFor(hz, h0, known) : null;
+    if (!known || gap == null || Math.abs(gap) > 1.2) {
+      $('stitchText').textContent = 'Measuring your camera'; await nextFrame();
+      const fov = measureLens(hz, h0);
+      if (fov && fov > 45 && fov < 95) { LONG_FOV = Math.round(fov * 10) / 10; store.set('fov', LONG_FOV); store.set('fovOk', true); }
+    } else LONG_FOV = known;
   }
-  const mosaic = canvas(W, H), m = mosaic.getContext('2d'), list = [];
+  const mosaic = bigCanvas(W, H), m = mosaic.getContext('2d'), list = [];
   const draw = (it) => { m.save(); if (Math.abs(it.gain - 1) > .01) m.filter = `brightness(${it.gain})`; for (const off of [0, -W, W]) m.drawImage(it.c, it.x + off, it.y); m.restore(); };
   for (let i = 0; i < shots.length; i++) {
     $('stitchText').textContent = `Stitching ${i + 1}/${shots.length}`; await nextFrame();
@@ -1993,9 +2000,10 @@ async function stitchAll(raw, h0) {
     list.push(it); draw(it);
     // after the last horizon photo: close the circle, spreading what is left over evenly
     if (s.row === 0 && i === hz.length - 1 && hz.length >= 6 && ALIGN) {
-      const first = list[0], tmp = canvas(W, H), t = tmp.getContext('2d');
-      for (const off of [0, -W, W]) t.drawImage(first.c, first.x + off, first.y);
-      const close = alignStrip(it.c, it.x, it.y, it.c.width, it.c.height, tmp);
+      const first = list[0], hw = W / 2, tmp = canvas(hw, hw / 2), t = tmp.getContext('2d');
+      for (const off of [0, -hw, hw]) t.drawImage(first.c, (first.x + off * 2) / 2, first.y / 2, first.c.width / 2, first.c.height / 2);
+      const half = alignStrip(it.c, it.x / 2, it.y / 2, it.c.width / 2, it.c.height / 2, tmp), close = half && { dx: half.dx * 2, dy: half.dy * 2, score: half.score };
+      free(tmp);
       if (close && close.score >= .25) {
         list.forEach((x, k) => { const f = k / (hz.length - 1); x.x += close.dx * f; x.y += close.dy * f; x.lon += close.dx * f / W * 360; x.lat -= close.dy * f / H * 180; });
         m.clearRect(0, 0, W, H); list.forEach(draw);
@@ -2011,7 +2019,7 @@ function composeSeams(base, list) {
   const W = base.width, H = base.height, BAND = 1.6 * DEG;
   const vec = (lon, lat) => { const a = lon * DEG, b = lat * DEG; return [Math.cos(b) * Math.sin(a), Math.cos(b) * Math.cos(a), Math.sin(b)]; };
   const C = list.map((s) => vec(s.lon, s.lat));
-  const top = canvas(W, H), tctx = top.getContext('2d');
+  const top = bigCanvas(W, H), tctx = top.getContext('2d');
   tctx.globalCompositeOperation = 'lighter';
   list.forEach((s, i) => {
     const nb = C.map((c, j) => j).filter((j) => j !== i && C[i][0] * C[j][0] + C[i][1] * C[j][1] + C[i][2] * C[j][2] > Math.cos(100 * DEG));
@@ -2023,10 +2031,11 @@ function composeSeams(base, list) {
       for (let x = 0; x < w; x++) {
         const o = (y * w + x) * 4 + 3; if (!d[o]) continue;
         const vx = cb * sinL[x], vy = cb * cosL[x], vz = sb;
-        const self = Math.acos(Math.min(1, vx * C[i][0] + vy * C[i][1] + vz * C[i][2]));
-        let other = Math.PI;
-        for (const j of nb) { const a = Math.acos(Math.min(1, vx * C[j][0] + vy * C[j][1] + vz * C[j][2])); if (a < other) other = a; }
-        const own = Math.min(1, Math.max(0, .5 + (other - self) / (2 * BAND)));
+        const ds = vx * C[i][0] + vy * C[i][1] + vz * C[i][2];
+        let dm = -2; for (const j of nb) { const dj = vx * C[j][0] + vy * C[j][1] + vz * C[j][2]; if (dj > dm) dm = dj; }
+        if (ds - dm > .03) continue;                    // clearly this photo's own area
+        if (dm - ds > .03) { d[o] = 0; continue; }       // clearly a neighbour's
+        const own = Math.min(1, Math.max(0, .5 + (Math.acos(Math.min(1, dm)) - Math.acos(Math.min(1, ds))) / (2 * BAND)));
         d[o] = d[o] * own;
       }
     }
@@ -2036,10 +2045,43 @@ function composeSeams(base, list) {
     tctx.restore();
   });
   // the cross-faded picture stays underneath, only where no single photo covers a spot
-  const out = canvas(W, H), o = out.getContext('2d');
-  o.drawImage(base, 0, 0); o.globalCompositeOperation = 'destination-out'; o.drawImage(top, 0, 0); o.globalCompositeOperation = 'source-over';
-  o.drawImage(top, 0, 0);
-  return out;
+  tctx.globalCompositeOperation = 'destination-over'; tctx.drawImage(base, 0, 0); tctx.globalCompositeOperation = 'source-over';
+  free(base);
+  smoothColour(top, list);
+  return top;
+}
+// Two-band blending: fine detail stays from one photo (sharp, no double images) while broad colour and
+// brightness follow a weighted average of all photos, so seams between exposures disappear.
+function smoothColour(pic, list) {
+  const W = pic.width, H = pic.height, S = 16, w = W / S, h = H / S;
+  const sum = new Float32Array(w * h * 3), wt = new Float32Array(w * h);
+  for (const it of list) {
+    const cw = Math.max(1, Math.round(it.c.width / S)), ch = Math.max(1, Math.round(it.c.height / S));
+    const c = canvas(cw, ch), x = c.getContext('2d', { willReadFrequently: true }); x.drawImage(it.c, 0, 0, cw, ch);
+    const d = x.getImageData(0, 0, cw, ch).data, ox = Math.round(it.x / S), oy = Math.round(it.y / S);
+    for (let y = 0; y < ch; y++) { const Y = oy + y; if (Y < 0 || Y >= h) continue;
+      for (let xx = 0; xx < cw; xx++) { const i = (y * cw + xx) * 4, a = d[i + 3] / 255; if (a < .02) continue;
+        const j = Y * w + ((ox + xx) % w + w) % w; sum[j * 3] += d[i] * it.gain * a; sum[j * 3 + 1] += d[i + 1] * it.gain * a; sum[j * 3 + 2] += d[i + 2] * it.gain * a; wt[j] += a; } }
+  }
+  const avg = canvas(w, h), ax = avg.getContext('2d', { willReadFrequently: true }), ad = ax.createImageData(w, h);
+  for (let j = 0; j < w * h; j++) if (wt[j] > .3) { ad.data[j * 4] = sum[j * 3] / wt[j]; ad.data[j * 4 + 1] = sum[j * 3 + 1] / wt[j]; ad.data[j * 4 + 2] = sum[j * 3 + 2] / wt[j]; ad.data[j * 4 + 3] = 255; }
+  ax.putImageData(ad, 0, 0);
+  const low = (src) => { const c = canvas(w, h), x = c.getContext('2d', { willReadFrequently: true }); x.filter = 'blur(2px)'; x.drawImage(src, 0, 0, w, h); return x.getImageData(0, 0, w, h).data; };
+  const A = low(avg), B = low(pic);
+  const diff = canvas(w, h), dx = diff.getContext('2d', { willReadFrequently: true }), dd = dx.createImageData(w, h);
+  for (let j = 0; j < w * h; j++) { const i = j * 4, ok = A[i + 3] > 245 && B[i + 3] > 245;
+    for (let c = 0; c < 3; c++) dd.data[i + c] = ok ? 128 + Math.max(-50, Math.min(50, A[i + c] - B[i + c])) : 128; dd.data[i + 3] = 255; }
+  dx.putImageData(dd, 0, 0);
+  const BAND = 128, up = canvas(W, BAND), ux = up.getContext('2d', { willReadFrequently: true }), px = pic.getContext('2d', { willReadFrequently: true });
+  ux.imageSmoothingQuality = 'high';
+  for (let y0 = 0; y0 < H; y0 += BAND) {
+    const bh = Math.min(BAND, H - y0);
+    ux.clearRect(0, 0, W, BAND); ux.drawImage(diff, 0, 0, w, h, 0, -y0, W, H);
+    const U = ux.getImageData(0, 0, W, bh).data, P = px.getImageData(0, y0, W, bh);
+    for (let i = 0; i < U.length; i += 4) { if (!P.data[i + 3]) continue; P.data[i] += U[i] - 128; P.data[i + 1] += U[i + 1] - 128; P.data[i + 2] += U[i + 2] - 128; }
+    px.putImageData(P, 0, y0);
+  }
+  free(up);
 }
 const inPlay = (tg) => cam.full || tg.row === 0;
 const rowDone = (ri) => cam.targets.filter((x) => x.row === ri).every((x) => x.done);
@@ -2116,21 +2158,51 @@ $('shutter').addEventListener('click', () => {
 });
 $('vfFinish').addEventListener('click', () => cam && finishCapture());
 
-// close the parts that were not filmed: soft colours from the edges, never a hard line
-function fillGaps(c, top, bot) {
-  const W = c.width, H = c.height, row = 6, base = canvas(W, H), x = base.getContext('2d');
-  top = Math.max(0, Math.round(top)); bot = Math.min(H - row, Math.round(bot));
-  x.fillStyle = '#05060c'; x.fillRect(0, 0, W, H);
-  x.save(); x.filter = 'blur(28px)';
-  if (top > 2) x.drawImage(c, 0, top, W, row, -60, -60, W + 120, top + 60 + H * .04);
-  if (bot < H - row - 2) x.drawImage(c, 0, bot - row, W, row, -60, bot - H * .04, W + 120, H - bot + 60 + H * .04);
-  x.filter = 'blur(18px)'; x.drawImage(c, 0, 0, W / 16, H / 16, 0, 0, W, H);      // fills small holes between rows
-  x.restore();
-  x.drawImage(c, 0, 0);
-  // straight down is where you stood: a soft dark circle instead of smeared colours
-  const g = x.createLinearGradient(0, H * .88, 0, H); g.addColorStop(0, 'rgba(4,5,11,0)'); g.addColorStop(.55, 'rgba(4,5,11,.85)'); g.addColorStop(1, '#04050b');
-  x.fillStyle = g; x.fillRect(0, H * .88, W, H * .12);
-  return base;
+// Closes what was not filmed (sky and ground when only the horizon was captured). Works column by column
+// at low resolution: the colour at the edge of the photo flows smoothly into one shared sky / ground
+// colour, and the photo's own edge fades into it, so there is no hard cut and no streaks.
+function fillGaps(c) {
+  const W = c.width, H = c.height, w = 256, h = 128, R = 8;
+  const sm = canvas(w, h), sx = sm.getContext('2d', { willReadFrequently: true }); sx.drawImage(c, 0, 0, w, h);
+  const d = sx.getImageData(0, 0, w, h).data, op = (x, y) => d[(y * w + x) * 4 + 3] > 230;
+  const T = new Float32Array(w), B = new Float32Array(w), tc = new Float32Array(w * 3), bc = new Float32Array(w * 3);
+  for (let x = 0; x < w; x++) {
+    let t = -1, b = -1; for (let y = 0; y < h; y++) if (op(x, y)) { if (t < 0) t = y; b = y; }
+    if (t < 0) { t = h / 2; b = h / 2; }
+    T[x] = t; B[x] = b;
+    const avgRows = (y0, y1, out) => { let n = 0; for (let y = Math.max(0, y0); y <= Math.min(h - 1, y1); y++) if (op(x, y)) { const i = (y * w + x) * 4; out[x * 3] += d[i]; out[x * 3 + 1] += d[i + 1]; out[x * 3 + 2] += d[i + 2]; n++; } if (n) for (let k = 0; k < 3; k++) out[x * 3 + k] /= n; };
+    avgRows(t + 1, t + 4, tc); avgRows(b - 4, b - 1, bc);
+  }
+  // smooth along the circle so there are no stripes
+  const smooth = (arr, n, r) => { const o = new Float32Array(arr.length); for (let x = 0; x < w; x++) for (let k = 0; k < n; k++) { let s = 0; for (let q = -r; q <= r; q++) s += arr[(((x + q) % w + w) % w) * n + k]; o[x * n + k] = s / (2 * r + 1); } return o; };
+  // the edge used for fading: never above the real edge nearby, then smoothed so it is not jagged
+  const localMax = (arr, r, dir) => { const o = new Float32Array(w); for (let x = 0; x < w; x++) { let m = dir > 0 ? -1e9 : 1e9; for (let q = -r; q <= r; q++) { const v = arr[((x + q) % w + w) % w]; m = dir > 0 ? Math.max(m, v) : Math.min(m, v); } o[x] = m; } return o; };
+  const Te = smooth(localMax(T, 4, 1), 1, 3), Be = smooth(localMax(B, 4, -1), 1, 3);
+  const tcs = smooth(tc, 3, 10), bcs = smooth(bc, 3, 10), tcw = smooth(tc, 3, 40), bcw = smooth(bc, 3, 40), Ts = Te, Bs = Be;
+  const mean = (arr) => [0, 1, 2].map((k) => { let s = 0; for (let x = 0; x < w; x++) s += arr[x * 3 + k]; return s / w; });
+  const sky = mean(tcs), ground = mean(bcs).map((v) => v * .75);
+  const fill = sx.createImageData(w, h), mask = sx.createImageData(w, h);
+  for (let x = 0; x < w; x++) for (let y = 0; y < h; y++) {
+    const i = (y * w + x) * 4, t = Ts[x], b = Bs[x];
+    let col;
+    if (y <= t + R) { const k = Math.pow(Math.min(1, y / Math.max(1, t + R)), 1.4), n = Math.pow(k, 4); col = [0, 1, 2].map((q) => { const edge = tcw[x * 3 + q] + (tcs[x * 3 + q] - tcw[x * 3 + q]) * n; return sky[q] + (edge - sky[q]) * k; }); }
+    else if (y >= b - R) { const k = Math.pow(Math.min(1, (h - 1 - y) / Math.max(1, h - 1 - (b - R))), 1.4), n = Math.pow(k, 4); col = [0, 1, 2].map((q) => { const edge = bcw[x * 3 + q] + (bcs[x * 3 + q] - bcw[x * 3 + q]) * n; return ground[q] + (edge - ground[q]) * k; }); }
+    else col = [d[i], d[i + 1], d[i + 2]];
+    fill.data[i] = col[0]; fill.data[i + 1] = col[1]; fill.data[i + 2] = col[2]; fill.data[i + 3] = 255;
+    // the photo fades in over R rows from where it starts, instead of stopping on a line
+    const a = y < Te[x] || y > Be[x] ? 0 : Math.min(1, (y - Te[x]) / R, (Be[x] - y) / R);
+    mask.data[i + 3] = 255 * a * a * (3 - 2 * a);
+  }
+  const fc = canvas(w, h); fc.getContext('2d').putImageData(fill, 0, 0);
+  const mc = canvas(w, h); mc.getContext('2d').putImageData(mask, 0, 0);
+  const p = c.getContext('2d'); p.globalCompositeOperation = 'destination-in'; p.imageSmoothingQuality = 'high'; p.drawImage(mc, 0, 0, W, H); p.globalCompositeOperation = 'source-over';
+  const out = bigCanvas(W, H), o = out.getContext('2d');
+  o.imageSmoothingQuality = 'high'; o.filter = 'blur(6px)'; o.drawImage(fc, 0, 0, W, H); o.filter = 'none';
+  o.drawImage(c, 0, 0); free(c);
+  // straight down is where you stood: a soft dark circle
+  const g = o.createLinearGradient(0, H * .9, 0, H); g.addColorStop(0, 'rgba(4,5,11,0)'); g.addColorStop(.6, 'rgba(4,5,11,.7)'); g.addColorStop(1, 'rgba(4,5,11,.95)');
+  o.fillStyle = g; o.fillRect(0, H * .9, W, H * .1);
+  return out;
 }
 async function blurFaces(c) {
   if (!('FaceDetector' in window)) return -1;
@@ -2153,7 +2225,8 @@ async function finishCapture() {
   $('stitchText').textContent = 'Blending the seams'; await nextFrame();
   const seams = list.length > 1 ? composeSeams(mosaic, list) : mosaic;
   $('stitchText').textContent = 'Filling the sky and the ground'; await nextFrame();
-  const full = fillGaps(seams, minY, maxY);
+  const full = fillGaps(seams);
+  list.forEach((it) => free(it.c)); c.raw.forEach((r) => (r.small = null));
   let faces = -1;
   if ($('fBlur').checked) { $('stitchText').textContent = 'Looking for faces to blur'; faces = await blurFaces(full); }
   draft = { canvas: full };
@@ -2623,7 +2696,7 @@ document.addEventListener('visibilitychange', () => { if (document.hidden && cam
     if (!prof?.name) showOnboard(1);
   }, 1200);
 })();
-window.__portals = { get calib() { return calibLog; },  get portals() { return portals; }, get reels() { return reels; }, get cam() { return cam; }, takeShot: (t) => takeShot(t), set align(v) { ALIGN = v; }, onBack, share360, withGPano };
+window.__portals = { get calib() { return calibLog; }, get draft() { return draft; },  get portals() { return portals; }, get reels() { return reels; }, get cam() { return cam; }, takeShot: (t) => takeShot(t), set align(v) { ALIGN = v; }, onBack, share360, withGPano };
 </script>
 </body>
 </html>
