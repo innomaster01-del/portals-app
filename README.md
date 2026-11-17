@@ -1,4 +1,4 @@
-# Portals – פרויקט האפליקציה (Android)
+# Portal X – פרויקט האפליקציה (Android)
 
 ## הורדה ישירה לטלפון
 https://github.com/innomaster01-del/portals-app/releases/latest/download/portals.apk

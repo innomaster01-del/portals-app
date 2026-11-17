@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Portals - step into places around the world</title>
+<title>Portal X - step into places around the world</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
@@ -680,6 +680,8 @@ button.mark{text-align:left}
 .photo-pick{display:flex;align-items:center;gap:10px;justify-content:center;cursor:pointer}.photo-pick img{width:44px;height:44px;border-radius:10px;object-fit:cover}
 .splash-icon{width:180px;height:180px;animation:splashIn .9s cubic-bezier(.2,1.4,.4,1),bob 4s ease-in-out infinite;filter:drop-shadow(0 0 30px rgba(139,92,246,.45))}
 #create.show ~ #toastHost .toast{top:auto;bottom:calc(150px + var(--sab))}
+.x{margin-inline-start:.06em;background:linear-gradient(120deg,var(--teal),var(--violet) 55%,var(--pink));-webkit-background-clip:text;background-clip:text;color:transparent;font-weight:800}
+[dir=rtl] .brand,[dir=rtl] .splash-word{direction:ltr}
 .reel-empty{height:100%;display:grid;place-content:center;justify-items:center;gap:10px;text-align:center;padding:30px}
 .reel-empty span{font-size:3rem}.reel-empty b{font-family:var(--head);font-size:1.3rem}
 .pf-stats{margin-top:4px}
@@ -692,7 +694,7 @@ button.mark{text-align:left}
 </head>
 <body>
 
-<div id="splash"><img class="splash-icon" src="./icon.png" alt=""><div class="splash-word">portals</div><p>Step into anywhere.</p></div>
+<div id="splash"><img class="splash-icon" src="./icon.png" alt=""><div class="splash-word wordmark">portal<span class="x">X</span></div><p>Step into anywhere.</p></div>
 
 <section id="onboard" class="screen" hidden>
   <div class="ob-step on" id="ob1">
@@ -730,7 +732,7 @@ button.mark{text-align:left}
 
   <header class="top">
     <div class="brand-row">
-      <div class="brand"><i></i>portals</div>
+      <div class="brand"><i></i><span class="wordmark">portal<span class="x">X</span></span></div>
       <div class="brand-right"><div class="count-chip glass" id="countChip"></div><button class="me-btn" id="meBtn" aria-label="Your profile"></button></div>
     </div>
     <label class="search glass"><span aria-hidden="true">🔍</span><input id="q" placeholder="Search your portals" autocomplete="off" aria-label="Search portals" dir="auto" enterkeyhint="search"></label>
@@ -1123,7 +1125,7 @@ function renderCards() {
   // the main screen is the globe; the row of cards only appears to invite the very first portal
   $('tray').classList.toggle('gone', portals.length > 0);
   $('trayTitle').textContent = 'Your portals';
-  if (!portals.length) { $('cards').innerHTML = `<button class="card card-new" id="firstPortal"><div class="thumb"><span class="plus">＋</span></div><div class="meta"><b>Open your first portal</b><span>Capture where you stand</span></div></button>`; $('firstPortal').onclick = openCreate; }
+  if (!portals.length) { $('cards').innerHTML = `<button class="card card-new" id="firstPortal"><div class="thumb"><span class="plus">＋</span></div><div class="meta"><b class="static">Open your first portal</b><span class="static">Capture where you stand</span></div></button>`; $('firstPortal').onclick = openCreate; }
   renderResults(); if (!$('gridPage').hidden) renderGrid();
   sizeGlobe();
 }
@@ -1721,7 +1723,7 @@ function openClip(blob) {
   const p = P, url = URL.createObjectURL(blob), ext = blob.type.includes('mp4') ? 'mp4' : 'webm';
   $('modal').hidden = false;
   $('modal').innerHTML = `<div class="sheet clip glass" role="dialog" aria-modal="true"><h3>Your clip</h3>
-    <div class="clip-frame"><video src="${url}" autoplay loop muted playsinline></video><div class="wm"><span class="brand-dot"></span>portals · ${esc(short(p))}</div></div>
+    <div class="clip-frame"><video src="${url}" autoplay loop muted playsinline></video><div class="wm"><span class="brand-dot"></span>Portal X · ${esc(short(p))}</div></div>
     <button class="btn btn-primary" id="clipShare" style="width:100%">📤 Share the video</button>
     <button class="btn btn-ghost" id="clipReel" style="width:100%">🎬 Add to my Reels</button>
     <button class="btn btn-ghost" id="clipClose" style="width:100%">Done</button></div>`;
@@ -2739,6 +2741,8 @@ const HE = {
   "↺ Retake": "↺ לצלם שוב",
   "That one was blurry. Aim again and hold still": "התמונה יצאה מטושטשת. לכוון שוב ולהחזיק יציב",
   "What is captured so far. Tap a spot to retake it.": "מה שצולם עד עכשיו. לוחצים על נקודה כדי לצלם אותה שוב.",
+  "portals": "פורטלים",
+  "portal": "פורטל",
   "visit": "ביקור",
   "visits": "ביקורים",
   "story": "סטורי",
@@ -2844,7 +2848,7 @@ function trText(s) {
   for (const [rx, rep] of HE_RX) if (rx.test(k)) return s.replace(k, k.replace(rx, rep));
   return null;
 }
-const SKIP = '.bubble,.scap,#pvTitle,.meta b,.meta span,.ptitle b,.ptitle span,.mlabel span,.rmeta,.door small,script,style';
+const SKIP = '.wordmark,.wm,.bubble,.scap,#pvTitle,.meta b:not(.static),.meta span:not(.static),.ptitle b,.ptitle span,.mlabel span,.rmeta,.door small,script,style';
 function translate(root) {
   if (LANG !== 'he' || !root) return;
   if (root.nodeType === 3) { if (root.parentElement?.closest(SKIP)) return; const t = trText(root.nodeValue); if (t !== null && t !== root.nodeValue) root.nodeValue = t; return; }
