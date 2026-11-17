@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Portals - step into places around the world</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=Space+Grotesk:wght@600;700&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0;overflow:hidden;background:#04050b;color:#f4f6fb;font-family:Inter,system-ui,sans-serif}
+  /* on a phone the app simply fills the screen */
+  #app{position:fixed;inset:0;width:100%;height:100%;border:0;display:block;background:#04050b}
+  .stage{display:none}
+  @media (min-width:700px) and (min-height:420px){
+    body{background:radial-gradient(900px 700px at 50% 40%,#1b1446,#05060d 70%)}
+    .stage{display:grid;position:fixed;inset:0;place-items:center}
+    .phone{position:absolute;left:50%;top:50%;width:414px;height:880px;border-radius:64px;padding:12px;background:linear-gradient(145deg,#2a2d3a,#0c0d12 40%,#1c1e27);
+      box-shadow:0 0 0 2px #3a3d4a,0 40px 120px rgba(0,0,0,.7),0 0 120px rgba(80,60,200,.25);transform-origin:center;flex:none}
+    .screen{position:relative;width:390px;height:856px;border-radius:52px;overflow:hidden;background:#04050b}
+    .status{position:absolute;inset:0 0 auto;height:50px;z-index:2;display:flex;align-items:center;justify-content:space-between;padding:6px 30px 0 34px;font-weight:600;font-size:15px;pointer-events:none}
+    .island{position:absolute;left:50%;top:11px;translate:-50% 0;width:122px;height:35px;border-radius:20px;background:#000}
+    .icons{display:flex;gap:6px;align-items:center;font-size:13px}
+    .bat{width:25px;height:12px;border:1.5px solid rgba(255,255,255,.8);border-radius:4px;padding:1.5px}.bat i{display:block;height:100%;width:78%;background:#fff;border-radius:1.5px}
+    #app{position:absolute;inset:50px 0 0;width:100%;height:calc(100% - 50px);border-radius:0 0 52px 52px}
+    .home{position:absolute;left:50%;bottom:8px;translate:-50% 0;width:134px;height:5px;border-radius:3px;background:rgba(255,255,255,.85);z-index:2;pointer-events:none}
+    .side{position:fixed;left:40px;top:50%;translate:0 -50%;max-width:260px;display:grid;gap:14px}
+    .side .logo{display:flex;align-items:center;gap:10px;font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:1.6rem}
+    .side .logo i{width:30px;height:30px;border-radius:50%;background:conic-gradient(#2ef2cf,#8b5cf6,#ff4fa3,#2ef2cf);-webkit-mask:radial-gradient(closest-side,transparent 58%,#000 62%);mask:radial-gradient(closest-side,transparent 58%,#000 62%)}
+    .side p{margin:0;color:#9aa3bd;line-height:1.5;font-size:.95rem}
+    .side a{color:#2ef2cf;font-weight:600;text-decoration:none}
+    @media (max-width:1100px){.side{display:none}}
+  }
+</style>
+</head>
+<body>
+  <div class="stage" id="stage">
+    <div class="phone" id="phone">
+      <div class="screen" id="screen">
+        <div class="status"><span id="clock">9:41</span><span class="island"></span><span class="icons">●●●● <span>5G</span><span class="bat"><i></i></span></span></div>
+        <div class="home"></div>
+      </div>
+    </div>
+    <aside class="side">
+      <div class="logo"><i></i>portals</div>
+      <p>This is the app as it looks on a phone. Use it with the mouse: drag to look around, tap to open things.</p>
+      <p><a href="app.html">Open full screen ↗</a></p>
+    </aside>
+  </div>
+  <iframe id="app" title="Portals app" allow="autoplay; fullscreen"></iframe>
+<script>
+  // Put the app inside the phone on wide screens, full screen on phones. The app is loaded once and moved, never reloaded.
+  const app = document.getElementById('app');
+  const screen = document.getElementById('screen'), phone = document.getElementById('phone');
+  const wide = matchMedia('(min-width:700px) and (min-height:420px)');
+  function place() {
+    if (wide.matches) {
+      if (app.parentElement !== screen) screen.insertBefore(app, screen.querySelector('.home'));
+      const s = Math.min(1, (innerHeight - 40) / 880, (innerWidth - 40) / 414);
+      phone.style.transform = `translate(-50%,-50%) scale(${s})`;
+    } else if (app.parentElement !== document.body) document.body.appendChild(app);
+  }
+  // moving an iframe reloads it in most browsers, so decide before it loads
+  place();
+  app.src = 'app.html' + (/^#[A-Za-z0-9-]+$/.test(location.hash) ? location.hash : '');
+  addEventListener('resize', () => { if (wide.matches) { const s = Math.min(1, (innerHeight - 40) / 880, (innerWidth - 40) / 414); phone.style.transform = `translate(-50%,-50%) scale(${s})`; } });
+  wide.addEventListener('change', place);
+  const tick = () => { const d = new Date(); document.getElementById('clock').textContent = d.getHours() + ':' + String(d.getMinutes()).padStart(2, '0'); };
+  tick(); setInterval(tick, 20000);
+</script>
+</body>
+</html>
