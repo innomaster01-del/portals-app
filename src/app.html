@@ -638,6 +638,7 @@ button.mark{text-align:left}
 .card-new .plus{font-size:2.6rem;font-weight:300;color:var(--teal);text-shadow:0 0 18px rgba(46,242,207,.7)}
 .card-new{border-style:dashed;border-color:rgba(46,242,207,.45)}
 .vf-rows{display:flex;gap:6px;flex-wrap:wrap;justify-content:center}
+.vf-map{width:min(240px,62vw);aspect-ratio:2;border-radius:14px;background:rgba(4,5,11,.55);box-shadow:0 0 0 1px rgba(255,255,255,.18),0 8px 22px rgba(0,0,0,.4);pointer-events:auto;touch-action:manipulation}
 .vf-rows span{font-size:.72rem;font-weight:700;padding:4px 9px;border-radius:999px;background:rgba(8,10,18,.6);color:var(--muted);border:1px solid var(--line)}
 .vf-rows span.on{color:var(--ink);border-color:var(--teal)}
 .vf-rows span.done{color:#03110e;background:var(--teal);border-color:var(--teal)}
@@ -676,6 +677,9 @@ button.mark{text-align:left}
 .tabbar button{min-width:62px}
 .tabbar .tab-plus{min-width:56px;width:56px;height:56px;margin:-14px 2px 0}
 .vf-target{width:96px;height:96px}
+.photo-pick{display:flex;align-items:center;gap:10px;justify-content:center;cursor:pointer}.photo-pick img{width:44px;height:44px;border-radius:10px;object-fit:cover}
+.splash-icon{width:180px;height:180px;animation:splashIn .9s cubic-bezier(.2,1.4,.4,1),bob 4s ease-in-out infinite;filter:drop-shadow(0 0 30px rgba(139,92,246,.45))}
+#create.show ~ #toastHost .toast{top:auto;bottom:calc(150px + var(--sab))}
 .reel-empty{height:100%;display:grid;place-content:center;justify-items:center;gap:10px;text-align:center;padding:30px}
 .reel-empty span{font-size:3rem}.reel-empty b{font-family:var(--head);font-size:1.3rem}
 .pf-stats{margin-top:4px}
@@ -688,7 +692,7 @@ button.mark{text-align:left}
 </head>
 <body>
 
-<div id="splash"><div class="bigring"></div><div class="splash-word">portals</div><p>Step into anywhere.</p></div>
+<div id="splash"><img class="splash-icon" src="./icon.png" alt=""><div class="splash-word">portals</div><p>Step into anywhere.</p></div>
 
 <section id="onboard" class="screen" hidden>
   <div class="ob-step on" id="ob1">
@@ -798,7 +802,9 @@ button.mark{text-align:left}
   <div class="step" id="step-capture">
     <canvas id="viewfinder"></canvas>
     <button class="icon-btn glass vf-x" data-cancel aria-label="Cancel">✕</button>
-    <div class="vf-top"><div class="vf-text glass" id="vfText">Hold the phone upright</div><div class="vf-rows" id="vfRows"></div></div>
+    <div class="vf-top"><div class="vf-text glass" id="vfText">Hold the phone upright</div><div class="vf-rows" id="vfRows"></div><canvas class="vf-map" id="vfMap" width="480" height="240" aria-label="What is captured so far. Tap a spot to retake it."></canvas></div>
+    <div class="vf-ask" id="vfRetake" hidden><div class="sheet glass"><h3>Retake this spot?</h3><p class="muted">Aim at the dot again and hold still. The sharper photo is kept.</p>
+      <button class="btn btn-primary" id="vfRetakeYes" style="width:100%">↺ Retake</button><button class="btn btn-ghost" id="vfRetakeNo" style="width:100%">Cancel</button></div></div>
     <div class="vf-ui"><div class="vf-target"><svg viewBox="0 0 120 120"><circle cx="60" cy="60" r="54" fill="none" stroke="rgba(255,255,255,.35)" stroke-width="4"/><circle id="vfArc" cx="60" cy="60" r="54" fill="none" stroke="url(#g)" stroke-width="5" stroke-linecap="round" stroke-dasharray="339.3" stroke-dashoffset="339.3"/><defs><linearGradient id="g"><stop offset="0" stop-color="#2ef2cf"/><stop offset="1" stop-color="#8b5cf6"/></linearGradient></defs></svg></div></div>
     <div class="vf-ask" id="vfAsk" hidden><div class="sheet glass"><div class="ok">✓</div><h3>The horizon is done</h3><p class="muted">Add the sky and the ground for a full sphere? About 40 more seconds.</p>
       <button class="btn btn-primary" id="vfMore" style="width:100%">☁️ Add sky and ground</button><button class="btn btn-ghost" id="vfDone" style="width:100%">✓ Finish</button></div></div>
@@ -840,7 +846,9 @@ const av = (p, cls = '') => `<span class="avatar ${cls}" style="--h:${p.hue ?? 2
 const canvas = (w, h) => { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; };
 const bigCanvas = (w, h) => { const c = canvas(w, h); c.getContext('2d', { willReadFrequently: true }); return c; };
 const free = (...cs) => cs.forEach((c) => { if (c) { c.width = 0; c.height = 0; } });
-const PANO_W = (navigator.deviceMemory || 8) < 4 ? 2048 : 4096;
+// panorama width: bigger on phones with the memory and graphics for it, smaller on weak ones
+const MAX_TEX = (() => { try { const g = document.createElement('canvas').getContext('webgl'); return g ? g.getParameter(g.MAX_TEXTURE_SIZE) : 4096; } catch { return 4096; } })();
+let PANO_W = (navigator.deviceMemory || 8) < 4 ? 2048 : (navigator.deviceMemory || 0) >= 8 && MAX_TEX >= 8192 ? 6144 : 4096;
 let mode = 'explore';
 
 let toastT;
@@ -915,7 +923,7 @@ const store = {
    ===================================================================== */
 let portals = [];          // newest first
 let reels = [];
-const keepPin = ({ u, y, name, hue, text, ago, at, likes, liked, e, kind, cap }) => ({ u, y, name, hue, text, ago, at, likes, liked, e, kind, cap });
+const keepPin = ({ u, y, name, hue, text, ago, at, likes, liked, e, kind, cap, img }) => ({ u, y, name, hue, text, ago, at, likes, liked, e, kind, cap, img });
 function record(p) {
   return { cover: p.cover || null, id: p.id, title: p.title, place: p.place, lat: p.lat, lon: p.lon, approx: p.approx, createdAt: p.createdAt, visits: p.visits || 0, thumb: p.thumb, img: p.img,
     marks: p.marks.map(keepPin), stickers: p.stickers.map(keepPin), windows: p.windows.map(keepPin) };
@@ -1413,25 +1421,59 @@ function renderPortal(t) {
   }
 }
 
+/* ---------- look around by moving the phone, like a window into the place ---------- */
+let motionOn = store.get('motion', true), lastLook = null, motionSeen = false;
+function onLookOri(e) {
+  if (mode !== 'portal' || !motionOn || e.alpha == null || e.beta == null) return;
+  const h = headingOf(rotationOf(e));
+  if (Math.abs(h.pitch) > 78) { lastLook = null; return; }      // pointing straight up or down: heading is unreliable there
+  if (lastLook && !pDrag && !recording) {
+    const dh = angDiff(h.heading, lastLook.heading), dp = h.pitch - lastLook.pitch;
+    if (Math.abs(dh) < 25 && Math.abs(dp) < 25) {
+      look.yaw -= dh * DEG; look.pitch = THREE.MathUtils.clamp(look.pitch + dp * DEG, PITCH.min, PITCH.max);
+      if (!motionSeen && Math.abs(dh) > .4) { motionSeen = true; $('hint').style.opacity = 0; if (!store.get('motionHint', false)) { toast('Move your phone to look around 📱'); store.set('motionHint', true); } }
+    }
+  }
+  lastLook = h;
+}
+addEventListener('deviceorientation', onLookOri);
+function toggleMotion() { motionOn = !motionOn; store.set('motion', motionOn); lastLook = null; haptic(); $('motionBtn')?.classList.toggle('on', motionOn); toast(motionOn ? 'Move your phone to look around 📱' : 'Phone movement is off. Drag to look around'); }
+
 /* ---------- chrome around the place ---------- */
 function header() {
   const p = P;
   $('ptitle').innerHTML = `${av(ME)}<div><b dir="auto">${esc(p.title)}</b><span dir="auto">${esc(p.place || '')}</span></div>`;
   $('hereChip').innerHTML = `📅 ${esc(whenText(p.createdAt))}`;
 }
-const PICKS = [['window', '🪟', 'Story'], ['comment', '💬', 'Comment'], ['sticker', '❤️', 'Like'], ['sticker', '🔥'], ['sticker', '😍'], ['sticker', '👏'], ['sticker', '😮'], ['here', '📍', 'I was here']];
-function itemFor(t, e) { return t === 'window' ? { type: 'window', e: '🪟' } : t === 'here' ? { type: 'sticker', e: '📍', name: ME.name + ' was here' } : t === 'sticker' ? { type: 'sticker', e } : { type: 'comment', e: '💬' }; }
+const PICKS = [['window', '🪟', 'Story'], ['photo', '🖼', 'Photo'], ['comment', '💬', 'Comment'], ['sticker', '❤️', 'Like'], ['sticker', '🔥'], ['sticker', '😍'], ['sticker', '👏'], ['sticker', '😮'], ['here', '📍', 'I was here']];
+function itemFor(t, e) { return t === 'photo' ? { type: 'window', e: '🖼', photo: true } : t === 'window' ? { type: 'window', e: '🪟' } : t === 'here' ? { type: 'sticker', e: '📍', name: ME.name + ' was here' } : t === 'sticker' ? { type: 'sticker', e } : { type: 'comment', e: '💬' }; }
 function bottom() {
   const p = P;
   if (placing && placing.loc) {
     $('pbottom').innerHTML = `<form class="compose glass" id="composeForm">
-      <h4>${placing.type === 'window' ? '🪟 Your story, right where you look' : '💬 Your comment, pinned right there'}</h4>
-      <div class="row"><input id="composeText" maxlength="120" placeholder="${placing.type === 'window' ? 'What is happening here now?' : 'Write something about this spot…'}" dir="auto" autocomplete="off" required>
+      <h4>${placing.photo ? '🖼 A photo from your gallery, right there' : placing.type === 'window' ? '🪟 Your story, right where you look' : '💬 Your comment, pinned right there'}</h4>
+      ${placing.photo ? `<label class="btn btn-ghost photo-pick" id="photoPick"><input type="file" accept="image/*" id="composePhoto" hidden>${placing.img ? `<img src="${placing.img}" alt="">` : ''}<span>${placing.img ? 'Choose another' : '🖼 Choose a photo'}</span></label>` : ''}
+      <div class="row"><input id="composeText" maxlength="120" placeholder="${placing.photo ? 'Add a caption (optional)' : placing.type === 'window' ? 'What is happening here now?' : 'Write something about this spot…'}" dir="auto" autocomplete="off" ${placing.photo ? '' : 'required'}>
       <button class="btn btn-primary" style="padding:0 18px">${placing.type === 'window' ? '🪟' : 'Pin it'}</button></div>
       <button type="button" class="btn btn-ghost" id="cancelPlace" style="min-height:40px">Cancel</button></form>`;
     $('cancelPlace').onclick = () => setPlacing(null);
+    if ($('composePhoto')) $('composePhoto').onchange = async (e) => {
+      const f = e.target.files[0]; if (!f) return;
+      try {
+        const im = await createImageBitmap(f), k = Math.min(1, 1600 / Math.max(im.width, im.height)), c = canvas(Math.round(im.width * k), Math.round(im.height * k));
+        c.getContext('2d').drawImage(im, 0, 0, c.width, c.height); im.close?.();
+        placing.img = c.toDataURL('image/jpeg', .86); const t = $('composeText').value; bottom(); $('composeText').value = t;
+      } catch { toast('That photo could not be opened'); }
+    };
     $('composeForm').onsubmit = (e) => {
-      e.preventDefault(); const text = $('composeText').value.trim(); if (!text) return;
+      e.preventDefault(); const text = $('composeText').value.trim();
+      if (placing.photo) {
+        if (!placing.img) return toast('Choose a photo first');
+        const w = { ...placing.loc, kind: 'photo', img: placing.img, at: Date.now(), cap: text };
+        p.windows.push(w); addPin('window', w, true); toast('Your photo is pinned in the place 🖼');
+        haptic('medium'); savePortal(p); return setPlacing(null);
+      }
+      if (!text) return;
       if (placing.type === 'window') {
         const w = { ...placing.loc, kind: 'snap', at: Date.now(), cap: text };
         p.windows.push(w); addPin('window', w, true); toast('Your story is pinned in the place 🪟');
@@ -1447,8 +1489,10 @@ function bottom() {
   if (placing) { $('pbottom').innerHTML = ''; return; }
   const top = picker ? `<div class="picker glass" id="picker"><p class="picker-hint"><span class="dd"><i>👆</i><b></b><em>🎯</em></span></p>${PICKS.map(([t, e, l]) => `<button data-t="${t}" data-e="${e}"><span>${e}</span>${l ? `<small>${l}</small>` : ''}</button>`).join('')}</div>` : '';
   $('pbottom').innerHTML = `${top}<nav class="bar glass"><button class="btn btn-primary" id="addBtn">＋ Add</button><span class="sep"></span>
+    <button class="icon-btn ${motionOn ? 'on' : ''}" id="motionBtn" aria-label="Look around by moving the phone" title="Look around by moving the phone">📱</button>
     <button class="icon-btn" id="clipBtn" aria-label="Record a clip" title="Record a clip">🎬</button>
     <button class="icon-btn" id="sharePortal" aria-label="Share as 360 photo">📤</button></nav>`;
+  $('motionBtn').onclick = toggleMotion;
   $('addBtn').onclick = () => { picker = !picker; haptic(); bottom(); };
   if (picker) $('picker').addEventListener('pointerdown', (e) => { const b = e.target.closest('button'); if (b) startDrag(e, itemFor(b.dataset.t, b.dataset.e)); });
   $('clipBtn').onclick = recordClip;
@@ -1542,7 +1586,7 @@ function pushBanner(html, ms = 3000, cls = '') {
 
 /* ---------- entering, hopping, leaving ---------- */
 function loadPortal(p) {
-  P = p; p.visits = (p.visits || 0) + 1;
+  P = p; p.visits = (p.visits || 0) + 1; lastLook = null; motionSeen = false;
   sphereMat.map?.dispose(); sphereMat.map = panoTex(p.canvas); sphereMat.needsUpdate = true;
   look = { yaw: 0, pitch: 0, vy: 0, vp: 0 }; marksVisible = true; placing = null; picker = false; ghost = null;
   $('placeBanner').hidden = true; $('gstack').innerHTML = '';
@@ -1592,7 +1636,15 @@ function exitPortal() {
 $('exit').addEventListener('click', exitPortal);
 
 /* ---------- story windows: little moments pinned where they were made ---------- */
+const photoCache = new Map();
+function photoOf(m) { let im = photoCache.get(m.img); if (!im) { im = new Image(); im.src = m.img; photoCache.set(m.img, im); } return im.complete && im.naturalWidth ? im : null; }
+function drawPhoto(c, W, H, m, t) {
+  const im = photoOf(m); c.fillStyle = '#0b0d18'; c.fillRect(0, 0, W, H); if (!im) return;
+  const z = 1.04 + Math.sin(t * .3) * .03, k = Math.max(W / im.naturalWidth, H / im.naturalHeight) * z, w = im.naturalWidth * k, h = im.naturalHeight * k;
+  c.drawImage(im, (W - w) / 2, (H - h) / 2, w, h);
+}
 function drawMoment(c, W, H, src, m, t) {
+  if (m.img) return drawPhoto(c, W, H, m, t);
   const PW = src.width, PH = src.height, cw = PW * .11, ch = cw * H / W;
   let sx = ((m.u * PW - cw / 2 + Math.sin(t * .4) * cw * .03) % PW + PW) % PW, sy = Math.max(0, Math.min(PH - ch, m.y * PH - ch * .55));
   const w1 = Math.min(cw, PW - sx);
@@ -1858,7 +1910,7 @@ async function startCapture() {
   const oriAsk = typeof D?.requestPermission === 'function' ? D.requestPermission().catch(() => 'denied') : Promise.resolve('granted');
   let stream;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1600 }, height: { ideal: 1200 }, aspectRatio: { ideal: 4 / 3 } } });
+    stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 2560 }, height: { ideal: 1920 }, aspectRatio: { ideal: 4 / 3 } } });
   } catch (err) { toast(err?.name === 'NotAllowedError' ? 'Camera permission is needed to open a portal' : 'No camera found on this device'); return; }
   await oriAsk;
   const video = document.createElement('video');
@@ -1991,24 +2043,91 @@ function measureLens(hz, h0) {
 const nextFrame = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
 let ALIGN = true;
 // during capture the app only keeps the photos; they are stitched together at the end
+// how sharp a photo is (variance of the Laplacian on a small grey copy); used to catch blurry photos
+function sharpness(img) {
+  const { width: w, height: h, data: d } = img, g = (x, y) => { const i = (y * w + x) * 4; return d[i] * .3 + d[i + 1] * .59 + d[i + 2] * .11; };
+  let s1 = 0, s2 = 0, n = 0;
+  for (let y = 2; y < h - 2; y += 2) for (let x = 2; x < w - 2; x += 2) { const l = 4 * g(x, y) - g(x - 1, y) - g(x + 1, y) - g(x, y - 1) - g(x, y + 1); s1 += l; s2 += l * l; n++; }
+  return n ? s2 / n - (s1 / n) ** 2 : 0;
+}
+const median = (a) => { const b = a.slice().sort((x, y) => x - y); return b.length ? b[b.length >> 1] : 0; };
+// during capture the app only keeps the photos; they are stitched together at the end
 function takeShot(target) {
   const v = cam.video, fw = v.videoWidth, fh = v.videoHeight; if (!fw || !fh) return false;
-  const fc = canvas(fw, fh), fctx = fc.getContext('2d', { willReadFrequently: true });
+  const fc = canvas(fw, fh), fctx = fc.getContext('2d');
   fctx.drawImage(v, 0, 0);
-  const R = cam.R.slice(), shot = { R, row: target.row, yaw: target.yaw, blob: null, small: null };
-  const px = fctx.getImageData(0, 0, fw, fh).data;
-  let sum = 0; for (let i = 0; i < px.length; i += 4 * 97) sum += px[i] + px[i + 1] + px[i + 2];
-  cam.dark = sum / (px.length / (4 * 97)) / 3 < 45;           // in the dark the phone must be held stiller
-  if (target.row === 0) { const sc = canvas(Math.round(fw / 2), Math.round(fh / 2)), sx = sc.getContext('2d'); sx.drawImage(fc, 0, 0, sc.width, sc.height); shot.small = sx.getImageData(0, 0, sc.width, sc.height); }
+  const qw = Math.round(fw / 4), qh = Math.round(fh / 4), q = canvas(qw, qh), qx = q.getContext('2d', { willReadFrequently: true });
+  qx.drawImage(fc, 0, 0, qw, qh);
+  const small = qx.getImageData(0, 0, qw, qh), px = small.data;
+  let sum = 0; for (let i = 0; i < px.length; i += 4 * 7) sum += px[i] + px[i + 1] + px[i + 2];
+  cam.dark = sum / (px.length / (4 * 7)) / 3 < 45;           // in the dark the phone must be held stiller
+  const ti = cam.targets.indexOf(target), R = cam.R.slice();
+  const shot = { R, row: target.row, yaw: target.yaw, ti, blob: null, small, sharp: sharpness(small), ok: true, mini: warpShot(small, R, cam.h0, LONG_FOV, 512) };
   cam.pending.push(new Promise((ok) => fc.toBlob((b) => { shot.blob = b; ok(); }, 'image/jpeg', .93)));
-  cam.raw.push(shot); cam.shots++; cam.lastShot = performance.now();
+  cam.shots++; cam.lastShot = performance.now();
+  // much blurrier than the other photos in this row? ask once to aim again (a plain wall can look "soft", so only once)
+  const row = cam.raw.filter((x) => x.ok && x.row === target.row).map((x) => x.sharp);
+  if (row.length >= 3 && shot.sharp < median(row) * .4 && !target.retried) {
+    target.retried = true; shot.ok = false; cam.raw.push(shot); target.blurry = true; drawMini();
+    return 'blurry';
+  }
+  // keep the sharpest photo for this spot
+  const prev = cam.raw.filter((x) => x.ti === ti);
+  const best = [...prev, shot].sort((x, y) => y.sharp - x.sharp)[0];
+  for (const x of [...prev, shot]) x.ok = x === best;
+  if (!prev.includes(shot)) cam.raw.push(shot);
+  target.blurry = false; drawMini();
   return true;
 }
+// the live mini-map: everything photographed so far, the dots still to do, and where the phone points
+function drawMini() {
+  const c = $('vfMap'); if (!c || !cam) return;
+  const x = c.getContext('2d'), w = c.width, h = c.height;
+  if (!cam.miniC) { cam.miniC = canvas(512, 256); }
+  const m = cam.miniC.getContext('2d'); m.clearRect(0, 0, 512, 256);
+  for (const s of cam.raw) if (s.ok && s.mini) for (const off of [0, -512, 512]) m.drawImage(s.mini.c, s.mini.x0 + off, s.mini.y0);
+  x.clearRect(0, 0, w, h);
+  // the start direction sits in the middle of the map
+  x.drawImage(cam.miniC, 128, 0, 384, 256, 0, 0, w * .75, h); x.drawImage(cam.miniC, 0, 0, 128, 256, w * .75, 0, w * .25, h);
+  x.strokeStyle = 'rgba(255,255,255,.12)'; x.lineWidth = 1; x.beginPath(); x.moveTo(0, h / 2); x.lineTo(w, h / 2); x.stroke();
+  for (const tg of cam.targets) {
+    if (!inPlay(tg)) continue;
+    const tx = (((.5 + tg.yaw / 360) % 1) + 1) % 1 * w, ty = (.5 - tg.pitch / 180) * h;
+    x.beginPath(); x.arc(tx, ty, tg.done ? 5 : 7, 0, 7);
+    if (tg.blurry) { x.fillStyle = '#ff9a3c'; x.fill(); }
+    else if (tg.done) { x.fillStyle = 'rgba(46,242,207,.95)'; x.fill(); }
+    else { x.strokeStyle = 'rgba(255,255,255,.9)'; x.lineWidth = 2; x.stroke(); }
+  }
+  if (cam.R && cam.h0 != null) {
+    const hp = headingOf(cam.R), vx = (((.5 + angDiff(hp.heading, cam.h0) / 360) % 1) + 1) % 1 * w, vy = (.5 - hp.pitch / 180) * h;
+    x.strokeStyle = '#fff'; x.lineWidth = 2.5; x.strokeRect(vx - 14, vy - 18, 28, 36);
+  }
+}
+let retakeTarget = null;
+$('vfMap').addEventListener('click', (e) => {
+  if (!cam?.started) return;
+  const r = $('vfMap').getBoundingClientRect(), mx = (e.clientX - r.left) / r.width, my = (e.clientY - r.top) / r.height;
+  let best = null, bd = .07;
+  for (const tg of cam.targets) {
+    if (!inPlay(tg) || !tg.done) continue;
+    const tx = (((.5 + tg.yaw / 360) % 1) + 1) % 1, ty = .5 - tg.pitch / 180, d = Math.hypot((tx - mx) * 2, ty - my);
+    if (d < bd) { bd = d; best = tg; }
+  }
+  if (!best) return;
+  retakeTarget = best; cam.paused = true; $('vfRetake').hidden = false; haptic();
+});
+$('vfRetakeYes').addEventListener('click', () => {
+  if (!cam || !retakeTarget) return;
+  retakeTarget.done = false; retakeTarget.retried = true;      // the new photo is compared with the old one; the sharper stays
+  cam.paused = false; $('vfRetake').hidden = true; $('vfAsk').hidden = true; retakeTarget = null; paintRows(); drawMini();
+});
+$('vfRetakeNo').addEventListener('click', () => { $('vfRetake').hidden = true; retakeTarget = null; if (cam) cam.paused = !$('vfAsk').hidden; });
 async function decodeFrame(blob) {
   const bmp = await createImageBitmap(blob), c = canvas(bmp.width, bmp.height), x = c.getContext('2d', { willReadFrequently: true });
   x.drawImage(bmp, 0, 0); bmp.close?.(); return x.getImageData(0, 0, c.width, c.height);
 }
-async function stitchAll(raw, h0) {
+async function stitchAll(rawAll, h0) {
+  const raw = rawAll.filter((s) => s.ok || !rawAll.some((x) => x.ti === s.ti && x.ok));
   const W = PANO_W, H = W / 2, shots = raw.slice().sort((a, b) => a.row - b.row || a.yaw - b.yaw), hz = shots.filter((s) => s.row === 0);
   if (hz.length >= 8) {
     // measured before on this phone? check that the circle still closes; measure again only if it does not
@@ -2131,9 +2250,11 @@ function paintRows() {
   $('vfArc').style.strokeDashoffset = 339.3 * (1 - d / total);
   $('vfFinish').hidden = !cam.full || d === total;
 }
+let frameNo = 0;
 function runViewfinder() {
   const cv = $('viewfinder'), ctx = cv.getContext('2d');
-  $('shutter').hidden = false; $('shutter').classList.remove('rec'); $('vfFinish').hidden = true; $('vfAsk').hidden = true;
+  $('shutter').hidden = false; $('shutter').classList.remove('rec'); $('vfFinish').hidden = true; $('vfAsk').hidden = true; $('vfRetake').hidden = true;
+  $('vfMap').getContext('2d').clearRect(0, 0, 480, 240);
   $('vfText').textContent = 'Hold the phone upright, at eye level'; $('vfSub').textContent = 'Tap to start';
   paintRows();
   const frame = (t) => {
@@ -2144,6 +2265,7 @@ function runViewfinder() {
     if (vw) {
       const k = Math.max(cv.width / vw, cv.height / vh), ox = (cv.width - vw * k) / 2, oy = (cv.height - vh * k) / 2;
       ctx.drawImage(v, ox, oy, vw * k, vh * k);
+      if (cam.started && frameNo++ % 3 === 0) drawMini();
       if (cam.started && cam.R && !cam.paused) {
         const f = (Math.max(vw, vh) / 2) / Math.tan(LONG_FOV / 2 * DEG), fwd = mul(cam.R, [0, 0, -1]);
         const row = activeRow(), still = !(cam.spin > (cam.dark ? 7 : 12));
@@ -2159,7 +2281,7 @@ function runViewfinder() {
           const on = tg.row === row, r = (on ? 15 : 8) * DPR;
           if (!on) continue;
           ctx.beginPath(); ctx.arc(sx, sy, r, 0, 7);
-          ctx.fillStyle = on ? 'rgba(255,255,255,.95)' : 'rgba(255,255,255,.35)'; ctx.shadowColor = '#2ef2cf'; ctx.shadowBlur = on ? 18 : 0; ctx.fill(); ctx.shadowBlur = 0;
+          ctx.fillStyle = tg.blurry ? '#ff9a3c' : on ? 'rgba(255,255,255,.95)' : 'rgba(255,255,255,.35)'; ctx.shadowColor = '#2ef2cf'; ctx.shadowBlur = on ? 18 : 0; ctx.fill(); ctx.shadowBlur = 0;
         }
         // guide to the next dot: a line when it is on screen, an arrow at the edge when it is not
         if (aimed) {
@@ -2181,7 +2303,9 @@ function runViewfinder() {
           const nearAng = Math.acos(Math.min(1, nearDot)) / DEG;
           if (nearAng < 3.5 && still) { cam.still += 1; } else cam.still = 0;
           if (cam.still >= (cam.dark ? 14 : 8) && performance.now() - cam.lastShot > 400) {
-            if (takeShot(near)) { near.done = true; haptic('medium'); paintRows(); if (afterShot()) { if (!cam) return; } }
+            const r = takeShot(near);
+            if (r === 'blurry') { haptic('heavy'); toast('That one was blurry. Aim again and hold still'); }
+            else if (r) { near.done = true; haptic('medium'); paintRows(); if (afterShot()) { if (!cam) return; } }
             cam.still = 0;
           }
           const ang = Math.min(Math.acos(Math.min(1, best)) / DEG, nearAng);
@@ -2268,7 +2392,9 @@ async function finishCapture() {
   const c = cam; stopCamera(); cancelAnimationFrame(capRAF); keepAwake(false);
   step('stitch'); $('stitchText').textContent = 'Stitching';
   await Promise.all(c.pending);
-  const { mosaic, list, minY, maxY } = await stitchAll(c.raw, c.h0);
+  let { mosaic, list } = await stitchAll(c.raw, c.h0);
+  const filled = (cv) => { try { const d = cv.getContext('2d').getImageData(0, cv.height / 2, cv.width, 1).data; let a = 0; for (let i = 3; i < d.length; i += 16) a += d[i] > 0; return a > d.length / 16 * .5; } catch { return false; } };
+  if (!filled(mosaic) && PANO_W > 4096) { free(mosaic); list.forEach((it) => free(it.c)); PANO_W = 4096; ({ mosaic, list } = await stitchAll(c.raw, c.h0)); }
   $('stitchText').textContent = 'Blending the seams'; await nextFrame();
   const seams = list.length > 1 ? composeSeams(mosaic, list) : mosaic;
   $('stitchText').textContent = 'Filling the sky and the ground'; await nextFrame();
@@ -2598,6 +2724,21 @@ const HE = {
   "Preparing the 360 photo…": "מכינים את תמונת ה-360…",
   "Preparing the video…": "מכינים את הסרטון…",
   "Could not prepare the photo": "לא הצלחנו להכין את התמונה",
+  "Photo": "תמונה",
+  "🖼 A photo from your gallery, right there": "🖼 תמונה מהגלריה, בדיוק שם",
+  "🖼 Choose a photo": "🖼 בחירת תמונה",
+  "Choose another": "לבחור אחרת",
+  "Add a caption (optional)": "כיתוב (לא חובה)",
+  "Choose a photo first": "קודם בוחרים תמונה",
+  "Your photo is pinned in the place 🖼": "התמונה שלך נעוצה במקום 🖼",
+  "Move your phone to look around 📱": "מזיזים את הטלפון כדי להסתכל מסביב 📱",
+  "Phone movement is off. Drag to look around": "תנועת הטלפון כבויה. גוררים כדי להסתכל מסביב",
+  "Look around by moving the phone": "להסתכל מסביב בהזזת הטלפון",
+  "Retake this spot?": "לצלם שוב את הנקודה הזו?",
+  "Aim at the dot again and hold still. The sharper photo is kept.": "מכוונים שוב לנקודה ומחזיקים יציב. התמונה החדה יותר נשמרת.",
+  "↺ Retake": "↺ לצלם שוב",
+  "That one was blurry. Aim again and hold still": "התמונה יצאה מטושטשת. לכוון שוב ולהחזיק יציב",
+  "What is captured so far. Tap a spot to retake it.": "מה שצולם עד עכשיו. לוחצים על נקודה כדי לצלם אותה שוב.",
   "visit": "ביקור",
   "visits": "ביקורים",
   "story": "סטורי",
@@ -2751,7 +2892,7 @@ document.addEventListener('visibilitychange', () => { if (document.hidden && cam
     if (!prof?.name) showOnboard(1);
   }, 1200);
 })();
-window.__portals = { get calib() { return calibLog; }, get draft() { return draft; },  get portals() { return portals; }, get reels() { return reels; }, get cam() { return cam; }, takeShot: (t) => takeShot(t), set align(v) { ALIGN = v; }, onBack, share360, withGPano };
+window.__portals = { get calib() { return calibLog; }, get draft() { return draft; }, get look() { return look; },  get portals() { return portals; }, get reels() { return reels; }, get cam() { return cam; }, takeShot: (t) => takeShot(t), set align(v) { ALIGN = v; }, onBack, share360, withGPano };
 </script>
 </body>
 </html>

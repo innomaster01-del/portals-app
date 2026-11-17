@@ -24,5 +24,6 @@ if (css) {
   writeFileSync('www/fonts/fonts.css', css);
   html = html.replace(/<link[^>]+fonts\.(googleapis|gstatic)\.com[^>]*>\s*/g, '').replace('</title>', '</title>\n<link rel="stylesheet" href="./fonts/fonts.css">');
 }
+for (const f of ['icon.png']) if (existsSync(`src/${f}`)) copyFileSync(`src/${f}`, `www/${f}`);
 writeFileSync('www/index.html', html);
 console.log('www/ ready', css ? '(fonts bundled)' : '(fonts from Google)');
