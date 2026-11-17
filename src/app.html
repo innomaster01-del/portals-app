@@ -833,6 +833,7 @@ button.mark{text-align:left}
 <div class="modal" id="modal" hidden></div>
 <div id="toastHost"></div>
 
+<script src="./vendor/jsfeat-min.js"></script>
 <script type="module">
 import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js';
 
@@ -2058,7 +2059,8 @@ function takeShot(target) {
   const v = cam.video, fw = v.videoWidth, fh = v.videoHeight; if (!fw || !fh) return false;
   const fc = canvas(fw, fh), fctx = fc.getContext('2d');
   fctx.drawImage(v, 0, 0);
-  const qw = Math.round(fw / 4), qh = Math.round(fh / 4), q = canvas(qw, qh), qx = q.getContext('2d', { willReadFrequently: true });
+  // a working copy for matching points, the mini-map and the lens: 640 pixels on its long side on every phone
+  const qk = Math.min(1, 640 / Math.max(fw, fh)), qw = Math.round(fw * qk), qh = Math.round(fh * qk), q = canvas(qw, qh), qx = q.getContext('2d', { willReadFrequently: true });
   qx.drawImage(fc, 0, 0, qw, qh);
   const small = qx.getImageData(0, 0, qw, qh), px = small.data;
   let sum = 0; for (let i = 0; i < px.length; i += 4 * 7) sum += px[i] + px[i + 1] + px[i + 2];
@@ -2128,30 +2130,234 @@ async function decodeFrame(blob) {
   const bmp = await createImageBitmap(blob), c = canvas(bmp.width, bmp.height), x = c.getContext('2d', { willReadFrequently: true });
   x.drawImage(bmp, 0, 0); bmp.close?.(); return x.getImageData(0, 0, c.width, c.height);
 }
+/* =====================================================================
+   STITCHING ENGINE (feature based, after Brown & Lowe, "Automatic Panoramic Image Stitching
+   using Invariant Features", the method behind OpenCV's stitcher):
+   1. feature points in every photo, 2. matches between overlapping photos, guided by the sensors
+   and checked with RANSAC, 3. bundle adjustment of every photo's full rotation and the lens,
+   4. gain compensation, 5. seams that follow where neighbouring photos agree.
+   Corner detection and binary descriptors come from jsfeat (MIT, vendor/jsfeat-min.js).
+   ===================================================================== */
+const popcnt = (v) => { v -= (v >>> 1) & 0x55555555; v = (v & 0x33333333) + ((v >>> 2) & 0x33333333); return (((v + (v >>> 4)) & 0x0F0F0F0F) * 0x01010101) >>> 24; };
+function extractFeatures(img, maxN = 700) {
+  const jf = window.jsfeat; if (!jf) return null;
+  const w = img.width, h = img.height, gray = new jf.matrix_t(w, h, jf.U8_t | jf.C1_t), blur = new jf.matrix_t(w, h, jf.U8_t | jf.C1_t);
+  jf.imgproc.grayscale(img.data, w, h, gray);
+  jf.imgproc.gaussian_blur(gray, blur, 5, 0);
+  const cap = (w * h) >> 3, corners = extractFeatures.pool && extractFeatures.pool.length >= cap ? extractFeatures.pool : (extractFeatures.pool = Array.from({ length: cap }, () => new jf.keypoint_t(0, 0, 0, 0, -1)));
+  jf.yape06.laplacian_threshold = 20; jf.yape06.min_eigen_value_threshold = 18;
+  let n = jf.yape06.detect(blur, corners, 18);
+  // keep the strongest corners, spread over the picture (an 8 x 8 grid, best in every cell first)
+  const G = 8, cells = Array.from({ length: G * G }, () => []);
+  for (let i = 0; i < n; i++) { const c = corners[i]; cells[Math.min(G - 1, (c.y / h * G) | 0) * G + Math.min(G - 1, (c.x / w * G) | 0)].push(c); }
+  cells.forEach((cl) => cl.sort((a, b) => b.score - a.score));
+  const pick = []; for (let r = 0; pick.length < maxN; r++) { let any = false; for (const cl of cells) if (cl[r]) { pick.push(cl[r]); any = true; if (pick.length >= maxN) break; } if (!any) break; }
+  const kps = pick.map((c) => new jf.keypoint_t(c.x, c.y, c.score, 0, 0));      // upright descriptors: the photos are not rotated much
+  const desc = new jf.matrix_t(32, kps.length, jf.U8_t | jf.C1_t);
+  if (kps.length) jf.orb.describe(blur, kps, kps.length, desc);
+  const pts = new Float32Array(kps.length * 2); kps.forEach((k, i) => { pts[i * 2] = k.x; pts[i * 2 + 1] = k.y; });
+  return { w, h, n: kps.length, pts, desc: new Uint32Array(desc.data.buffer, desc.data.byteOffset, kps.length * 8), gray: gray.data.slice() };
+}
+const rayOf = (x, y, w, h, f) => { const v = [x - w / 2, -(y - h / 2), -f], n = Math.hypot(v[0], v[1], v[2]); return [v[0] / n, v[1] / n, v[2] / n]; };
+const focalOf = (w, h, fov) => (Math.max(w, h) / 2) / Math.tan(fov / 2 * DEG);
+const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const norm3 = (a) => { const n = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / n, a[1] / n, a[2] / n]; };
+// rotation that takes the frame (a1, a2) onto (b1, b2): the classic two-vector "triad"
+function triad(a1, a2, b1, b2) {
+  const ta = [a1, norm3(cross3(a1, a2))]; ta.push(cross3(ta[0], ta[1]));
+  const tb = [b1, norm3(cross3(b1, b2))]; tb.push(cross3(tb[0], tb[1]));
+  const Q = new Array(9).fill(0);
+  for (let k = 0; k < 3; k++) for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) Q[r * 3 + c] += tb[k][r] * ta[k][c];
+  return Q;
+}
+const mat3v = (M, v) => [M[0] * v[0] + M[1] * v[1] + M[2] * v[2], M[3] * v[0] + M[4] * v[1] + M[5] * v[2], M[6] * v[0] + M[7] * v[1] + M[8] * v[2]];
+const mat3m = (A, B) => { const C = new Array(9); for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) C[r * 3 + c] = A[r * 3] * B[c] + A[r * 3 + 1] * B[3 + c] + A[r * 3 + 2] * B[6 + c]; return C; };
+function expRot(w) {
+  const t = Math.hypot(w[0], w[1], w[2]); if (t < 1e-12) return [1, 0, 0, 0, 1, 0, 0, 0, 1];
+  const k = [w[0] / t, w[1] / t, w[2] / t], c = Math.cos(t), s = Math.sin(t), v = 1 - c;
+  return [c + k[0] * k[0] * v, k[0] * k[1] * v - k[2] * s, k[0] * k[2] * v + k[1] * s,
+          k[1] * k[0] * v + k[2] * s, c + k[1] * k[1] * v, k[1] * k[2] * v - k[0] * s,
+          k[2] * k[0] * v - k[1] * s, k[2] * k[1] * v + k[0] * s, c + k[2] * k[2] * v];
+}
+// matches between two photos: nearest binary descriptor, ratio test, only where the sensors say the
+// two points could be the same direction, then RANSAC on a pure rotation
+function matchPair(A, B, Ra, Rb, fov) {
+  const fa = focalOf(A.w, A.h, fov), fb = focalOf(B.w, B.h, fov);
+  const WA = [], WB = [];
+  for (let i = 0; i < A.n; i++) WA.push(mat3v(Ra, rayOf(A.pts[i * 2], A.pts[i * 2 + 1], A.w, A.h, fa)));
+  for (let j = 0; j < B.n; j++) WB.push(mat3v(Rb, rayOf(B.pts[j * 2], B.pts[j * 2 + 1], B.w, B.h, fb)));
+  const gate = Math.cos(6 * DEG), cand = [];
+  for (let i = 0; i < A.n; i++) {
+    let best = 999, second = 999, bj = -1; const ai = i * 8;
+    for (let j = 0; j < B.n; j++) {
+      if (dot3(WA[i], WB[j]) < gate) continue;
+      const bjo = j * 8; let d = 0; for (let k = 0; k < 8; k++) d += popcnt(A.desc[ai + k] ^ B.desc[bjo + k]);
+      if (d < best) { second = best; best = d; bj = j; } else if (d < second) second = d;
+    }
+    if (bj >= 0 && best < 70 && best < second * .85) cand.push([i, bj]);
+  }
+  if (cand.length < 8) return [];
+  // RANSAC: the correction between the two photos is a small rotation
+  const thr = Math.cos(.6 * DEG); let bestIn = [];
+  for (let it = 0; it < 300; it++) {
+    const p = cand[(Math.random() * cand.length) | 0], q = cand[(Math.random() * cand.length) | 0]; if (p === q) continue;
+    if (dot3(WA[p[0]], WA[q[0]]) > Math.cos(1.5 * DEG)) continue;                       // too close together to define a rotation
+    const Q = triad(WA[p[0]], norm3(WA[q[0]]), WB[p[1]], norm3(WB[q[1]]));
+    const inl = cand.filter(([i, j]) => dot3(mat3v(Q, WA[i]), WB[j]) > thr);
+    if (inl.length > bestIn.length) bestIn = inl;
+  }
+  return bestIn.length >= 10 ? bestIn : [];
+}
+function solveLinear(H, g) {   // Gaussian elimination with partial pivoting; H is n x n (array of rows), solves H x = g
+  const n = g.length, M = H.map((r, i) => [...r, g[i]]);
+  for (let c = 0; c < n; c++) {
+    let p = c; for (let r = c + 1; r < n; r++) if (Math.abs(M[r][c]) > Math.abs(M[p][c])) p = r;
+    if (Math.abs(M[p][c]) < 1e-14) return null;
+    [M[c], M[p]] = [M[p], M[c]];
+    for (let r = c + 1; r < n; r++) { const f = M[r][c] / M[c][c]; if (!f) continue; for (let k = c; k <= n; k++) M[r][k] -= f * M[c][k]; }
+  }
+  const x = new Array(n).fill(0);
+  for (let r = n - 1; r >= 0; r--) { let s = M[r][n]; for (let k = r + 1; k < n; k++) s -= M[r][k] * x[k]; x[r] = s / M[r][r]; }
+  return x;
+}
+// Bundle adjustment ("ray" cost, as in OpenCV): every matched point must point the same way from both
+// photos. Unknowns: a small rotation for every photo and the lens field of view. A weak pull towards the
+// sensor rotations keeps the horizon level.
+function bundleAdjust(F, Rs0, pairs, fov0) {
+  const N = F.length, P = 3 * N + 1, Rs = Rs0.map((R) => R.slice()), Om = Array.from({ length: N }, () => [0, 0, 0]);
+  let lf = Math.log(focalOf(1, 1, fov0)), lambda = 1e-3;
+  const obs = []; for (const pr of pairs) { const m = pr.m.length > 90 ? pr.m.filter((_, k) => k % Math.ceil(pr.m.length / 90) === 0) : pr.m; for (const [i, j] of m) obs.push([pr.a, i, pr.b, j]); }
+  const rays = (k, idx, lfv) => { const A = F[k], f = Math.exp(lfv) * Math.max(A.w, A.h); return rayOf(A.pts[idx * 2], A.pts[idx * 2 + 1], A.w, A.h, f); };
+  const HUB = 3 / (Math.exp(lf) * 640), MU = 1;
+  const cost = (R, lfv) => { let s = 0; for (const [a, i, b, j] of obs) { const r = mat3v(R[a], rays(a, i, lfv)), q = mat3v(R[b], rays(b, j, lfv)), e = Math.hypot(r[0] - q[0], r[1] - q[1], r[2] - q[2]); s += e < HUB ? e * e : 2 * HUB * e - HUB * HUB; } return s; };
+  let cur = cost(Rs, lf);
+  for (let iter = 0; iter < 25; iter++) {
+    const H = Array.from({ length: P }, () => new Float64Array(P)), g = new Float64Array(P), eps = 1e-5;
+    for (const [a, i, b, j] of obs) {
+      const da = rays(a, i, lf), db = rays(b, j, lf), va = mat3v(Rs[a], da), vb = mat3v(Rs[b], db);
+      const r = [va[0] - vb[0], va[1] - vb[1], va[2] - vb[2]], e = Math.hypot(r[0], r[1], r[2]), w = e < HUB ? 1 : HUB / e;
+      const va2 = mat3v(Rs[a], rays(a, i, lf + eps)), vb2 = mat3v(Rs[b], rays(b, j, lf + eps));
+      const Jf = [((va2[0] - vb2[0]) - r[0]) / eps, ((va2[1] - vb2[1]) - r[1]) / eps, ((va2[2] - vb2[2]) - r[2]) / eps];
+      const sk = (v, s) => [[0, -v[2] * s, v[1] * s], [v[2] * s, 0, -v[0] * s], [-v[1] * s, v[0] * s, 0]];
+      const Ja = sk(va, -1), Jb = sk(vb, 1);                  // d r / d(rotation of a), d r / d(rotation of b)
+      const cols = []; for (let c = 0; c < 3; c++) { cols.push([3 * a + c, [Ja[0][c], Ja[1][c], Ja[2][c]]]); cols.push([3 * b + c, [Jb[0][c], Jb[1][c], Jb[2][c]]]); }
+      cols.push([P - 1, Jf]);
+      for (const [p, jp] of cols) { g[p] += w * dot3(jp, r); for (const [q, jq] of cols) H[p][q] += w * dot3(jp, jq); }
+    }
+    for (let k = 0; k < N; k++) for (let c = 0; c < 3; c++) { H[3 * k + c][3 * k + c] += MU; g[3 * k + c] += MU * Om[k][c]; }
+    for (let p = 0; p < P; p++) H[p][p] *= 1 + lambda;
+    const step = solveLinear(H.map((r) => Array.from(r)), Array.from(g, (v) => -v)); if (!step) break;
+    const R2 = Rs.map((R, k) => mat3m(expRot([step[3 * k], step[3 * k + 1], step[3 * k + 2]]), R)), lf2 = lf + step[P - 1];
+    const c2 = cost(R2, lf2);
+    if (c2 < cur) {
+      for (let k = 0; k < N; k++) { Rs[k] = R2[k]; Om[k][0] += step[3 * k]; Om[k][1] += step[3 * k + 1]; Om[k][2] += step[3 * k + 2]; }
+      lf = lf2; const gain = (cur - c2) / cur; cur = c2; lambda = Math.max(1e-7, lambda / 4);
+      if (gain < 1e-5) break;
+    } else lambda *= 8;
+  }
+  const f = Math.exp(lf), fov = 2 * Math.atan(.5 / f) / DEG;
+  let s = 0; for (const [a, i, b, j] of obs) { const r = mat3v(Rs[a], rays(a, i, lf)), q = mat3v(Rs[b], rays(b, j, lf)); s += Math.acos(Math.min(1, dot3(r, q))); }
+  return { Rs, fov, rms: obs.length ? s / obs.length / DEG : 0, n: obs.length };
+}
+// gain compensation: one brightness factor per photo so that shared points match. Solved on the log of
+// the brightness ratio per pair of photos (weighted by how many points they share), which has no pull
+// towards darker or brighter overall; a tiny pull to 1 fixes the overall level.
+function solveGains(F, pairs) {
+  const N = F.length, A = Array.from({ length: N }, () => new Array(N).fill(0)), b = new Array(N).fill(0);
+  const val = (Fk, idx) => { const x = Math.round(Fk.pts[idx * 2]), y = Math.round(Fk.pts[idx * 2 + 1]); let s = 0, n = 0; for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) { const xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < Fk.w && yy < Fk.h) { s += Fk.gray[yy * Fk.w + xx]; n++; } } return s / Math.max(1, n); };
+  for (const pr of pairs) {
+    let sa = 0, sb = 0; for (const [i, j] of pr.m) { sa += val(F[pr.a], i); sb += val(F[pr.b], j); }
+    if (sa < 1 || sb < 1) continue;
+    const r = Math.log(sb / sa), w = pr.m.length;              // want log g_a - log g_b = log(Ib / Ia)
+    A[pr.a][pr.a] += w; A[pr.b][pr.b] += w; A[pr.a][pr.b] -= w; A[pr.b][pr.a] -= w; b[pr.a] += w * r; b[pr.b] -= w * r;
+  }
+  for (let k = 0; k < N; k++) A[k][k] += 1;
+  const x = solveLinear(A, b) || new Array(N).fill(0);
+  return x.map((v) => Math.min(1.4, Math.max(.7, Math.exp(v))));
+}
+// Seams that go where two neighbouring photos look the same (dynamic programming over the overlap),
+// so a seam runs along a plain wall instead of cutting through a person or an object.
+function findSeams(lows, pairsIdx, Ws) {
+  const seams = new Map();
+  for (const [a, b] of pairsIdx) {
+    const A = lows[a], B = lows[b]; if (!A || !B) continue;
+    const cA = (.75 + A.lon / 360) * Ws, cB = cA + angDiff(B.lon, A.lon) / 360 * Ws, shiftB = Math.round((cB - (.75 + B.lon / 360) * Ws) / Ws) * Ws;
+    const ax0 = A.x0, bx0 = B.x0 + shiftB, x0 = Math.max(ax0, bx0), x1 = Math.min(ax0 + A.w, bx0 + B.w), y0 = Math.max(A.y0, B.y0), y1 = Math.min(A.y0 + A.h, B.y0 + B.h);
+    if (x1 - x0 < 6 || y1 - y0 < 6) continue;
+    const ww = x1 - x0, hh = y1 - y0, cost = new Float32Array(ww * hh), mid = (cA + cB) / 2;
+    for (let y = 0; y < hh; y++) for (let x = 0; x < ww; x++) {
+      const ia = ((y0 + y - A.y0) * A.w + (x0 + x - ax0)) * 4, ib = ((y0 + y - B.y0) * B.w + (x0 + x - bx0)) * 4;
+      const ok = A.d[ia + 3] > 200 && B.d[ib + 3] > 200;
+      let c = 1e4;
+      if (ok) { c = 0; for (let k = 0; k < 3; k++) c += Math.abs(A.d[ia + k] * A.gain - B.d[ib + k] * B.gain); c /= 3; }
+      const off = (x0 + x - mid) / (ww / 2); cost[y * ww + x] = c + 6 * off * off;      // a mild pull to the middle of the overlap
+    }
+    const acc = new Float32Array(ww * hh), from = new Int8Array(ww * hh);
+    for (let x = 0; x < ww; x++) acc[x] = cost[x];
+    for (let y = 1; y < hh; y++) for (let x = 0; x < ww; x++) {
+      let best = acc[(y - 1) * ww + x], bd = 0;
+      if (x > 0 && acc[(y - 1) * ww + x - 1] < best) { best = acc[(y - 1) * ww + x - 1]; bd = -1; }
+      if (x < ww - 1 && acc[(y - 1) * ww + x + 1] < best) { best = acc[(y - 1) * ww + x + 1]; bd = 1; }
+      acc[y * ww + x] = best + cost[y * ww + x]; from[y * ww + x] = bd;
+    }
+    let bx = 0; for (let x = 1; x < ww; x++) if (acc[(hh - 1) * ww + x] < acc[(hh - 1) * ww + bx]) bx = x;
+    const xs = new Float32Array(hh); for (let y = hh - 1; y >= 0; y--) { xs[y] = x0 + bx + .5; bx += from[y * ww + bx]; }
+    seams.set(a + '>' + b, { y0, xs });
+  }
+  return seams;
+}
 async function stitchAll(rawAll, h0) {
   const raw = rawAll.filter((s) => s.ok || !rawAll.some((x) => x.ti === s.ti && x.ok));
   const W = PANO_W, H = W / 2, shots = raw.slice().sort((a, b) => a.row - b.row || a.yaw - b.yaw), hz = shots.filter((s) => s.row === 0);
+  // a starting value for the lens: measured before on this phone, or measured now from the horizon circle
   if (hz.length >= 8) {
-    // measured before on this phone? check that the circle still closes; measure again only if it does not
     const known = store.get('fovOk', false) && store.get('fov', 0);
     const gap = known ? closureFor(hz, h0, known) : null;
     if (!known || gap == null || Math.abs(gap) > 1.2) {
       $('stitchText').textContent = 'Measuring your camera'; await nextFrame();
       const fov = measureLens(hz, h0);
-      if (fov && fov > 45 && fov < 95) { LONG_FOV = Math.round(fov * 10) / 10; store.set('fov', LONG_FOV); store.set('fovOk', true); }
+      if (fov && fov > 45 && fov < 95) LONG_FOV = Math.round(fov * 10) / 10;
     } else LONG_FOV = known;
   }
+  // ---- feature engine: match points between photos and solve every rotation and the lens together ----
+  let Rs = shots.map((s) => s.R), gains = shots.map(() => 1), engine = false, pairs = [];
+  if (window.jsfeat && !window.__noEngine && shots.length >= 2) {
+    $('stitchText').textContent = 'Finding matching points'; await nextFrame();
+    const F = shots.map((s) => extractFeatures(s.small));
+    const fwdOf = (R) => mat3v(R, [0, 0, -1]), sm = shots[0].small, hfov = 2 * Math.atan(Math.tan(LONG_FOV / 2 * DEG) * Math.min(sm.width, sm.height) / Math.max(sm.width, sm.height)) / DEG;
+    for (let a = 0; a < shots.length; a++) for (let b = a + 1; b < shots.length; b++) {
+      if (dot3(fwdOf(shots[a].R), fwdOf(shots[b].R)) < Math.cos(Math.min(70, LONG_FOV * .95) * DEG)) continue;
+      const m = matchPair(F[a], F[b], shots[a].R, shots[b].R, LONG_FOV);
+      if (m.length) pairs.push({ a, b, m });
+      if ((a * shots.length + b) % 6 === 0) await nextFrame();
+    }
+    // connected photos: the engine is used only if almost every photo found its neighbours
+    const linked = new Set(pairs.flatMap((p) => [p.a, p.b]));
+    window.__engine = { pairs: pairs.map((p) => [p.a, p.b, p.m.length]), linked: linked.size, n: shots.length };
+    if (linked.size >= Math.max(2, Math.ceil(shots.length * .8)) && pairs.length >= shots.length - 1) {
+      $('stitchText').textContent = 'Lining up every photo'; await nextFrame();
+      const ba = bundleAdjust(F, shots.map((s) => s.R), pairs, LONG_FOV);
+      window.__engine.ba = { fov: ba.fov, rms: ba.rms, n: ba.n };
+      if (ba.fov > 45 && ba.fov < 95 && ba.rms < .5) {
+        Rs = ba.Rs; LONG_FOV = Math.round(ba.fov * 100) / 100; engine = true;
+        gains = solveGains(F, pairs);
+        if (hz.length >= 8) { store.set('fov', LONG_FOV); store.set('fovOk', true); }
+      }
+    }
+  }
+  if (!engine && hz.length >= 8) { store.set('fov', LONG_FOV); store.set('fovOk', true); }
   const mosaic = bigCanvas(W, H), m = mosaic.getContext('2d'), list = [];
   const draw = (it) => { m.save(); if (Math.abs(it.gain - 1) > .01) m.filter = `brightness(${it.gain})`; for (const off of [0, -W, W]) m.drawImage(it.c, it.x + off, it.y); m.restore(); };
   for (let i = 0; i < shots.length; i++) {
     $('stitchText').textContent = `Stitching ${i + 1}/${shots.length}`; await nextFrame();
-    const s = shots[i], w = warpShot(await decodeFrame(s.blob), s.R, h0, LONG_FOV, W); if (!w) continue;
-    const fix = ALIGN && list.length ? alignStrip(w.c, w.x0, w.y0, w.w, w.h, mosaic) : null;
+    const s = shots[i], w = warpShot(await decodeFrame(s.blob), Rs[i], h0, LONG_FOV, W); if (!w) continue;
+    // the engine already solved the positions; without it, slide each photo onto what is painted
+    const fix = !engine && ALIGN && list.length ? alignStrip(w.c, w.x0, w.y0, w.w, w.h, mosaic) : null;
     const dx = fix?.dx || 0, dy = fix?.dy || 0;
-    const it = { c: w.c, x: w.x0 + dx, y: w.y0 + dy, gain: fix?.gain || 1, lon: w.lon + dx / W * 360, lat: w.lat - dy / H * 180, row: s.row };
+    const it = { c: w.c, x: w.x0 + dx, y: w.y0 + dy, gain: engine ? gains[i] : fix?.gain || 1, lon: w.lon + dx / W * 360, lat: w.lat - dy / H * 180, row: s.row, si: i };
     list.push(it); draw(it);
-    // after the last horizon photo: close the circle, spreading what is left over evenly
-    if (s.row === 0 && i === hz.length - 1 && hz.length >= 6 && ALIGN) {
+    if (!engine && s.row === 0 && i === hz.length - 1 && hz.length >= 6 && ALIGN) {
       const first = list[0], hw = W / 2, tmp = canvas(hw, hw / 2), t = tmp.getContext('2d');
       for (const off of [0, -hw, hw]) t.drawImage(first.c, (first.x + off * 2) / 2, first.y / 2, first.c.width / 2, first.c.height / 2);
       const half = alignStrip(it.c, it.x / 2, it.y / 2, it.c.width / 2, it.c.height / 2, tmp), close = half && { dx: half.dx * 2, dy: half.dy * 2, score: half.score };
@@ -2162,26 +2368,56 @@ async function stitchAll(rawAll, h0) {
       }
     }
   }
+  // seams between neighbours on the horizon follow where the two photos agree
+  let seams = null;
+  if (engine) {
+    $('stitchText').textContent = 'Choosing the seams'; await nextFrame();
+    const Ws = 1024, lows = shots.map((s, i) => { const w = warpShot(s.small, Rs[i], h0, LONG_FOV, Ws); if (!w) return null; const d = w.c.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w.w, w.h).data; return { ...w, d, gain: gains[i] }; });
+    const hzIdx = shots.map((s, i) => i).filter((i) => shots[i].row === 0), nb = [];
+    if (hzIdx.length >= 3) for (let k = 0; k < hzIdx.length; k++) nb.push([hzIdx[k], hzIdx[(k + 1) % hzIdx.length]]);
+    else if (hzIdx.length === 2) nb.push([hzIdx[0], hzIdx[1]]);
+    seams = { map: findSeams(lows, nb, Ws), scale: W / Ws, nb };
+  }
   let minY = H, maxY = 0; list.forEach((x) => { minY = Math.min(minY, x.y + x.c.height * .06); maxY = Math.max(maxY, x.y + x.c.height * .94); });
-  return { mosaic, list, minY, maxY };
+  return { mosaic, list, minY, maxY, seams };
 }
 // Final picture: every spot comes from the one photo whose centre is closest to it, with a narrow
 // soft seam between neighbours. Wide cross-fades are what make double images, so they are avoided.
-function composeSeams(base, list) {
+function composeSeams(base, list, seams) {
   const W = base.width, H = base.height, BAND = 1.6 * DEG;
   const vec = (lon, lat) => { const a = lon * DEG, b = lat * DEG; return [Math.cos(b) * Math.sin(a), Math.cos(b) * Math.cos(a), Math.sin(b)]; };
   const C = list.map((s) => vec(s.lon, s.lat));
   const top = bigCanvas(W, H), tctx = top.getContext('2d');
   tctx.globalCompositeOperation = 'lighter';
+  const wrapd = (v) => ((v % W) + W * 1.5) % W - W / 2;          // shortest horizontal distance on the circle
   list.forEach((s, i) => {
-    const nb = C.map((c, j) => j).filter((j) => j !== i && C[i][0] * C[j][0] + C[i][1] * C[j][1] + C[i][2] * C[j][2] > Math.cos(100 * DEG));
+    // seams found along the horizon (left neighbour and right neighbour), in full-size pixels
+    let segL = null, segR = null; const sideNb = new Set();
+    if (seams) for (const [a, b] of seams.nb) {
+      const sm = seams.map.get(a + '>' + b); if (!sm) continue;
+      if (b === s.si) { segL = sm; const k = list.findIndex((x) => x.si === a); if (k >= 0) sideNb.add(k); }
+      if (a === s.si) { segR = sm; const k = list.findIndex((x) => x.si === b); if (k >= 0) sideNb.add(k); }
+    }
+    const seamAt = (sm, Y) => { const ys = Y / seams.scale - sm.y0, k = Math.max(0, Math.min(sm.xs.length - 1, Math.round(ys))); return sm.xs[k] * seams.scale; };
+    const ccx = (.75 + s.lon / 360) * W, SB = Math.max(2, seams ? seams.scale * 1.2 : 2);
+    const nb = C.map((c, j) => j).filter((j) => j !== i && !sideNb.has(j) && C[i][0] * C[j][0] + C[i][1] * C[j][1] + C[i][2] * C[j][2] > Math.cos(100 * DEG));
     const w = s.c.width, h = s.c.height, cx = s.c.getContext('2d', { willReadFrequently: true }), img = cx.getImageData(0, 0, w, h), d = img.data;
     const sinL = new Float32Array(w), cosL = new Float32Array(w);
     for (let x = 0; x < w; x++) { const lon = ((s.x + x + .5) / W - .75) * 2 * Math.PI; sinL[x] = Math.sin(lon); cosL[x] = Math.cos(lon); }
     for (let y = 0; y < h; y++) {
       const lat = (.5 - (s.y + y + .5) / H) * Math.PI, cb = Math.cos(lat), sb = Math.sin(lat);
+      const Y = s.y + y, sl = segL && seamAt(segL, Y), sr = segR && seamAt(segR, Y);
       for (let x = 0; x < w; x++) {
         const o = (y * w + x) * 4 + 3; if (!d[o]) continue;
+        if (segL || segR) {
+          const dx = wrapd(s.x + x - ccx);
+          let own = 1;
+          if (segL) own *= Math.min(1, Math.max(0, .5 + (dx - wrapd(sl - ccx)) / SB));
+          if (segR) own *= Math.min(1, Math.max(0, .5 + (wrapd(sr - ccx) - dx) / SB));
+          if (own <= 0) { d[o] = 0; continue; }
+          d[o] = d[o] * own;
+          if (!nb.length) continue;
+        }
         const vx = cb * sinL[x], vy = cb * cosL[x], vz = sb;
         const ds = vx * C[i][0] + vy * C[i][1] + vz * C[i][2];
         let dm = -2; for (const j of nb) { const dj = vx * C[j][0] + vy * C[j][1] + vz * C[j][2]; if (dj > dm) dm = dj; }
@@ -2394,11 +2630,11 @@ async function finishCapture() {
   const c = cam; stopCamera(); cancelAnimationFrame(capRAF); keepAwake(false);
   step('stitch'); $('stitchText').textContent = 'Stitching';
   await Promise.all(c.pending);
-  let { mosaic, list } = await stitchAll(c.raw, c.h0);
+  let { mosaic, list, seams: seamInfo } = await stitchAll(c.raw, c.h0);
   const filled = (cv) => { try { const d = cv.getContext('2d').getImageData(0, cv.height / 2, cv.width, 1).data; let a = 0; for (let i = 3; i < d.length; i += 16) a += d[i] > 0; return a > d.length / 16 * .5; } catch { return false; } };
-  if (!filled(mosaic) && PANO_W > 4096) { free(mosaic); list.forEach((it) => free(it.c)); PANO_W = 4096; ({ mosaic, list } = await stitchAll(c.raw, c.h0)); }
+  if (!filled(mosaic) && PANO_W > 4096) { free(mosaic); list.forEach((it) => free(it.c)); PANO_W = 4096; ({ mosaic, list, seams: seamInfo } = await stitchAll(c.raw, c.h0)); }
   $('stitchText').textContent = 'Blending the seams'; await nextFrame();
-  const seams = list.length > 1 ? composeSeams(mosaic, list) : mosaic;
+  const seams = list.length > 1 ? composeSeams(mosaic, list, seamInfo) : mosaic;
   $('stitchText').textContent = 'Filling the sky and the ground'; await nextFrame();
   const full = fillGaps(seams);
   list.forEach((it) => free(it.c)); c.raw.forEach((r) => (r.small = null));
@@ -2743,6 +2979,9 @@ const HE = {
   "What is captured so far. Tap a spot to retake it.": "מה שצולם עד עכשיו. לוחצים על נקודה כדי לצלם אותה שוב.",
   "portals": "פורטלים",
   "portal": "פורטל",
+  "Finding matching points": "מחפשים נקודות משותפות",
+  "Lining up every photo": "מיישרים כל תמונה",
+  "Choosing the seams": "בוחרים איפה לחבר",
   "visit": "ביקור",
   "visits": "ביקורים",
   "story": "סטורי",
