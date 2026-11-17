@@ -642,6 +642,39 @@ button.mark{text-align:left}
 .vf-rows span.on{color:var(--ink);border-color:var(--teal)}
 .vf-rows span.done{color:#03110e;background:var(--teal);border-color:var(--teal)}
 #vfFinish{min-height:40px;font-size:.9rem}
+.vf-ask{position:absolute;inset:0;z-index:5;display:grid;place-items:center;padding:24px;background:rgba(2,3,8,.55);animation:fade .25s}
+.vf-ask .sheet{gap:10px}.vf-ask .ok{width:58px;height:58px;margin:0 auto;border-radius:50%;display:grid;place-items:center;font-size:1.7rem;background:rgba(46,242,207,.2);color:var(--teal)}
+/* main screen search results */
+.sresults{max-width:520px;width:100%;border-radius:20px;padding:6px;display:grid;gap:2px;max-height:52vh;overflow:auto}
+.sres{display:flex;align-items:center;gap:12px;padding:8px;border-radius:14px;text-align:start}
+.sres:hover,.sres:focus-visible{background:rgba(255,255,255,.07)}
+.sres i{flex:none;width:46px;height:46px;border-radius:12px;background-size:cover;background-position:center}
+.sres span{display:grid;min-width:0}.sres b{font-size:.92rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.sres small{font-size:.76rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sres-empty{padding:12px;color:var(--muted);font-size:.88rem}
+.tray.gone{display:none}
+/* portals tab: a grid of squares */
+.gridpage{position:absolute;inset:0;z-index:5;overflow-y:auto;background:radial-gradient(900px 600px at 50% 0%,#141033,#04050b 65%);padding:calc(18px + var(--sat)) 16px calc(110px + var(--sab));animation:fade .25s;overscroll-behavior:contain}
+.gp-head{display:flex;align-items:baseline;justify-content:space-between;max-width:760px;margin:0 auto 12px}
+.gp-head h2{font-family:var(--head);font-size:1.6rem;letter-spacing:-.02em}
+.gridpage .search{margin:0 auto 10px;max-width:760px}
+.gp-sort{display:flex;gap:8px;max-width:760px;margin:0 auto 14px;overflow-x:auto;scrollbar-width:none}
+.gp-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;max-width:760px;margin:0 auto}
+@media (min-width:600px){.gp-grid{grid-template-columns:repeat(3,1fr)}}
+.tile{position:relative;display:grid;gap:6px}
+.tile-img{position:relative;width:100%;aspect-ratio:1;border-radius:20px;background:#0b0d18 center/cover;overflow:hidden;box-shadow:0 0 0 1px var(--line),0 10px 26px rgba(0,0,0,.35);transition:transform .15s}
+.tile-img:active{transform:scale(.97)}
+.tile-img::after{content:"";position:absolute;inset:0;background:linear-gradient(transparent 55%,rgba(0,0,0,.55))}
+.tile-img .tile-date{position:absolute;z-index:1;left:8px;bottom:8px;font-size:.68rem;font-weight:600;padding:3px 8px;border-radius:999px;background:rgba(0,0,0,.5)}
+.tile-img .tile-n{position:absolute;z-index:1;right:8px;bottom:8px;font-size:.68rem;font-weight:600;padding:3px 8px;border-radius:999px;background:rgba(0,0,0,.5)}
+.tile-meta{display:grid;padding:0 4px;min-width:0}.tile-meta b{font-size:.9rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.tile-meta span{font-size:.75rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile-more{position:absolute;top:8px;right:8px;z-index:2;width:34px;height:34px;border-radius:50%;background:rgba(0,0,0,.45);font-size:1rem;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}
+[dir=rtl] .tile-more{right:auto;left:8px}
+.tile-new .tile-img{display:grid;place-items:center;background:radial-gradient(circle at 50% 45%,rgba(46,242,207,.2),rgba(139,92,246,.1) 60%,transparent 75%),rgba(255,255,255,.03);box-shadow:0 0 0 1.5px rgba(46,242,207,.45)}
+.tile-new .tile-img::after{display:none}
+.tile-new .plus{font-size:2.6rem;color:var(--teal);text-shadow:0 0 18px rgba(46,242,207,.7)}
+.gp-empty{grid-column:1/-1;text-align:center;color:var(--muted);padding:24px}
+.tabbar button{min-width:62px}
+.tabbar .tab-plus{min-width:56px;width:56px;height:56px;margin:-14px 2px 0}
 .vf-target{width:96px;height:96px}
 .reel-empty{height:100%;display:grid;place-content:center;justify-items:center;gap:10px;text-align:center;padding:30px}
 .reel-empty span{font-size:3rem}.reel-empty b{font-family:var(--head);font-size:1.3rem}
@@ -696,7 +729,8 @@ button.mark{text-align:left}
       <div class="brand"><i></i>portals</div>
       <div class="brand-right"><div class="count-chip glass" id="countChip"></div><button class="me-btn" id="meBtn" aria-label="Your profile"></button></div>
     </div>
-    <label class="search glass"><span aria-hidden="true">🔍</span><input id="q" placeholder="Search your portals" autocomplete="off" aria-label="Search portals" dir="auto"></label>
+    <label class="search glass"><span aria-hidden="true">🔍</span><input id="q" placeholder="Search your portals" autocomplete="off" aria-label="Search portals" dir="auto" enterkeyhint="search"></label>
+    <div class="sresults glass" id="sresults" hidden></div>
   </header>
 
   <section class="tray" id="tray">
@@ -708,7 +742,13 @@ button.mark{text-align:left}
     <header class="rtop"><b>Reels</b><span class="rkey"><i class="rring mini"></i>👆 = step in</span></header>
     <div class="reel-feed" id="reelFeed"></div>
   </section>
-  <nav class="tabbar glass" id="tabbar"><button class="on" id="tabExplore"><span>🌍</span><small>Explore</small></button><button id="tabReels"><span>🎬</span><small>Reels</small></button><button class="tab-plus" id="openCreate" aria-label="Open a portal">＋</button><button id="tabMe"><span id="tabAvatar"></span><small>Me</small></button></nav>
+  <section class="gridpage" id="gridPage" hidden>
+    <header class="gp-head"><h2>My portals</h2><span class="muted" id="gpCount"></span></header>
+    <label class="search glass"><span aria-hidden="true">🔍</span><input id="gq" placeholder="Search your portals" autocomplete="off" aria-label="Search portals" dir="auto" enterkeyhint="search"></label>
+    <div class="gp-sort" id="gpSort"><button class="chip on" data-s="new">Newest</button><button class="chip" data-s="name">A–Z</button><button class="chip" data-s="visits">Most visited</button><button class="chip" data-s="marks">Most comments</button></div>
+    <div class="gp-grid" id="gpGrid"></div>
+  </section>
+  <nav class="tabbar glass" id="tabbar"><button class="on" id="tabExplore"><span>🌍</span><small>Explore</small></button><button id="tabGrid"><span>▦</span><small>Portals</small></button><button class="tab-plus" id="openCreate" aria-label="Open a portal">＋</button><button id="tabReels"><span>🎬</span><small>Reels</small></button><button id="tabMe"><span id="tabAvatar"></span><small>Me</small></button></nav>
   <aside class="preview glass" id="preview" aria-label="Portal preview">
     <button class="icon-btn close" id="pvClose" aria-label="Close">✕</button>
     <div class="peek"><div class="ring"></div><canvas id="peek" width="400" height="400"></canvas><div class="ring2"></div></div>
@@ -749,7 +789,7 @@ button.mark{text-align:left}
     <ul class="howto">
       <li><span>📍</span><p><b>Stand in one spot</b>Turn the phone around itself, not around you.</p></li>
       <li><span>🎯</span><p><b>Aim the circle at each dot</b>It snaps a photo by itself when you hold still.</p></li>
-      <li><span>☁️</span><p><b>Horizon first, then sky and ground</b>About a minute for the whole sphere. You can finish after the horizon.</p></li>
+      <li><span>☁️</span><p><b>The horizon is enough</b>About 20 seconds. After it you choose whether to add the sky and the ground.</p></li>
     </ul>
     <button class="btn btn-primary" id="startCapture" style="width:min(360px,100%);min-height:54px">📷 Capture with the camera</button>
     <label class="btn btn-ghost" style="width:min(360px,100%);min-height:50px;cursor:pointer"><input type="file" accept="image/*" id="uploadPano" hidden>🖼 Upload a 360° or panorama photo</label>
@@ -760,6 +800,8 @@ button.mark{text-align:left}
     <button class="icon-btn glass vf-x" data-cancel aria-label="Cancel">✕</button>
     <div class="vf-top"><div class="vf-text glass" id="vfText">Hold the phone upright</div><div class="vf-rows" id="vfRows"></div></div>
     <div class="vf-ui"><div class="vf-target"><svg viewBox="0 0 120 120"><circle cx="60" cy="60" r="54" fill="none" stroke="rgba(255,255,255,.35)" stroke-width="4"/><circle id="vfArc" cx="60" cy="60" r="54" fill="none" stroke="url(#g)" stroke-width="5" stroke-linecap="round" stroke-dasharray="339.3" stroke-dashoffset="339.3"/><defs><linearGradient id="g"><stop offset="0" stop-color="#2ef2cf"/><stop offset="1" stop-color="#8b5cf6"/></linearGradient></defs></svg></div></div>
+    <div class="vf-ask" id="vfAsk" hidden><div class="sheet glass"><div class="ok">✓</div><h3>The horizon is done</h3><p class="muted">Add the sky and the ground for a full sphere? About 40 more seconds.</p>
+      <button class="btn btn-primary" id="vfMore" style="width:100%">☁️ Add sky and ground</button><button class="btn btn-ghost" id="vfDone" style="width:100%">✓ Finish</button></div></div>
     <div class="vf-bottom"><button class="shutter" id="shutter" aria-label="Start capturing"><i></i></button><span class="muted" id="vfSub" style="font-size:.85rem">Tap to start</span><button class="btn btn-ghost" id="vfFinish" hidden>Finish now</button></div>
   </div>
 
@@ -968,10 +1010,10 @@ const trayIsPreview = () => $('preview').classList.contains('up');
 function sizeGlobe() {
   gW = globeCanvas.clientWidth; gH = globeCanvas.clientHeight; if (!gW) return;
   gR.setSize(gW, gH, false); gCam.aspect = gW / gH;
-  const wide = gW >= 820, avail = wide ? Math.min(gW * .62, gH * .62) : Math.min(gW * .92, gH * .46);
+  const wide = gW >= 820, avail = wide ? Math.min(gW * .62, gH * .62) : Math.min(gW * .94, gH * (portals.length ? .56 : .46));
   camDist = 1 / (Math.tan(gCam.fov * DEG / 2) * (avail / gH));
   if (!camZ) camZ = camDist;
-  gCam.setViewOffset(gW, gH, wide && trayIsPreview() ? gW * .12 : 0, wide ? -gH * .02 : gH * .02, gW, gH);
+  gCam.setViewOffset(gW, gH, wide && trayIsPreview() ? gW * .12 : 0, wide ? -gH * .02 : trayIsPreview() ? gH * .2 : portals.length ? -gH * .01 : gH * .02, gW, gH);
   gCam.updateProjectionMatrix();
   world.children.forEach((o) => o.material?.uniforms?.px && (o.material.uniforms.px.value = Math.max(2.2, gH * .0042) * DPR));
 }
@@ -1056,15 +1098,60 @@ function renderCards() {
   const list = portals.filter((p) => !q || `${p.title} ${p.place}`.toLowerCase().includes(q));
   for (const m of markers.values()) m.el.dataset.f = list.includes(m.p) ? '' : 'out';
   $('countChip').innerHTML = `<b>${portals.length}</b> ${portals.length === 1 ? 'portal' : 'portals'}`;
+  // the main screen is the globe; the row of cards only appears to invite the very first portal
+  $('tray').classList.toggle('gone', portals.length > 0);
   $('trayTitle').textContent = 'Your portals';
-  if (!portals.length) { $('cards').innerHTML = `<button class="card card-new" id="firstPortal"><div class="thumb"><span class="plus">＋</span></div><div class="meta"><b>Open your first portal</b><span>Capture where you stand</span></div></button>`; $('firstPortal').onclick = openCreate; return; }
-  if (!list.length) { $('cards').innerHTML = `<p class="empty">No portals match that.</p>`; return; }
-  $('cards').innerHTML = list.map((p) => `<button class="card" data-id="${p.id}"><div class="thumb" style="background-image:url(${p.thumb})"><span class="here">${esc(whenText(p.createdAt))}</span></div><div class="meta"><b dir="auto">${esc(p.title)}</b><span dir="auto">${esc(p.place || '')}</span></div></button>`).join('')
-    + `<button class="card card-new" id="newPortal"><div class="thumb"><span class="plus">＋</span></div><div class="meta"><b>New portal</b><span>Capture where you stand</span></div></button>`;
-  $('newPortal').onclick = openCreate;
+  if (!portals.length) { $('cards').innerHTML = `<button class="card card-new" id="firstPortal"><div class="thumb"><span class="plus">＋</span></div><div class="meta"><b>Open your first portal</b><span>Capture where you stand</span></div></button>`; $('firstPortal').onclick = openCreate; }
+  renderResults(); if (!$('gridPage').hidden) renderGrid();
+  sizeGlobe();
 }
-$('cards').addEventListener('click', (e) => { const b = e.target.closest('.card[data-id]'); if (b) select(portals.find((p) => p.id === b.dataset.id)); });
+function renderResults() {
+  const box = $('sresults'), q = query.trim().toLowerCase();
+  if (!q || document.activeElement !== $('q')) { box.hidden = true; return; }
+  const list = portals.filter((p) => `${p.title} ${p.place}`.toLowerCase().includes(q)).slice(0, 8);
+  box.hidden = false;
+  box.innerHTML = list.length ? list.map((p) => `<button class="sres" data-id="${p.id}"><i style="background-image:url(${p.thumb})"></i><span><b dir="auto">${esc(p.title)}</b><small dir="auto">${esc(p.place || whenText(p.createdAt))}</small></span></button>`).join('') : `<p class="sres-empty">No portals match that.</p>`;
+}
+$('sresults').addEventListener('pointerdown', (e) => e.preventDefault());   // keep the keyboard until a result is chosen
+$('sresults').addEventListener('click', (e) => { const b = e.target.closest('.sres'); if (!b) return; $('q').blur(); $('sresults').hidden = true; select(portals.find((p) => p.id === b.dataset.id)); });
 $('q').addEventListener('input', (e) => { query = e.target.value; renderCards(); });
+$('q').addEventListener('focus', renderResults);
+$('q').addEventListener('blur', () => setTimeout(() => ($('sresults').hidden = true), 120));
+$('q').addEventListener('keydown', (e) => { if (e.key === 'Enter') { const first = $('sresults').querySelector('.sres'); if (first) first.click(); } });
+
+/* ---------- the Portals tab: every portal as a square ---------- */
+let gridQuery = '', gridSort = 'new';
+function renderGrid() {
+  const q = gridQuery.trim().toLowerCase();
+  const sorters = { new: (a, b) => b.createdAt - a.createdAt, name: (a, b) => a.title.localeCompare(b.title), visits: (a, b) => (b.visits || 0) - (a.visits || 0), marks: (a, b) => b.marks.length - a.marks.length };
+  const list = portals.filter((p) => !q || `${p.title} ${p.place}`.toLowerCase().includes(q)).sort(sorters[gridSort]);
+  $('gpCount').textContent = `${portals.length} ${portals.length === 1 ? 'portal' : 'portals'}`;
+  $('gpGrid').innerHTML = (q ? '' : `<div class="tile tile-new"><button class="tile-img" id="gpNew" aria-label="New portal"><span class="plus">＋</span></button><div class="tile-meta"><b>New portal</b><span>Capture where you stand</span></div></div>`)
+    + list.map((p) => `<div class="tile" data-id="${p.id}"><button class="tile-img" data-open style="background-image:url(${p.thumb})"><span class="tile-date">${esc(whenText(p.createdAt))}</span>${p.marks.length ? `<span class="tile-n">💬 ${p.marks.length}</span>` : ''}</button><button class="tile-more" data-more aria-label="More">⋯</button><div class="tile-meta"><b dir="auto">${esc(p.title)}</b><span dir="auto">${esc(p.place || '')}</span></div></div>`).join('')
+    + (q && !list.length ? `<p class="gp-empty">No portals match that.</p>` : '');
+  $('gpNew') && ($('gpNew').onclick = openCreate);
+}
+$('gpGrid').addEventListener('click', async (e) => {
+  const tile = e.target.closest('.tile[data-id]'); if (!tile) return;
+  const p = portals.find((x) => x.id === tile.dataset.id);
+  if (e.target.closest('[data-more]')) return sheet(p.title, [
+    ['🌍 Show on the globe', () => { closeModal(); hideGrid(); select(p); }],
+    ['📤 Share as 360 photo', () => { closeModal(); share360(p); }],
+    ['✎ Rename', () => renamePortal(p)],
+    ['🗑 Delete', () => deletePortal(p), 'danger'],
+  ]);
+  const r = tile.querySelector('.tile-img').getBoundingClientRect(); haptic('medium');
+  await getPano(p); enterPortal(p, r);
+});
+$('gq').addEventListener('input', (e) => { gridQuery = e.target.value; renderGrid(); });
+$('gpSort').addEventListener('click', (e) => { const b = e.target.closest('[data-s]'); if (!b) return; gridSort = b.dataset.s; [...$('gpSort').children].forEach((c) => c.classList.toggle('on', c === b)); haptic(); renderGrid(); });
+function showGrid() { hideProfile(); hideReels(); closePreview(); $('gridPage').hidden = false; renderGrid(); syncTab(); }
+function hideGrid() { $('gridPage').hidden = true; syncTab(); }
+function syncTab() {
+  const on = !$('profile').hidden ? 'tabMe' : !$('reels').hidden ? 'tabReels' : !$('gridPage').hidden ? 'tabGrid' : 'tabExplore';
+  ['tabExplore', 'tabGrid', 'tabReels', 'tabMe'].forEach((id) => $(id).classList.toggle('on', id === on));
+}
+$('tabGrid').onclick = () => (haptic(), showGrid());
 
 let peekRAF = 0;
 async function runPeek(cv, p) {
@@ -1121,7 +1208,7 @@ function deletePortal(p) {
   confirmSheet(`Delete “${p.title}”?`, 'The 360 photo, comments and stories in it are removed from this phone.', 'Delete', async () => {
     portals = portals.filter((x) => x !== p); reels = reels.filter((r) => r.p !== p);
     await idbSet('p:' + p.id, undefined); await idbSet('list', portals.map((x) => x.id)); saveReels();
-    removeMarker(p.id); closePreview(); renderCards(); toast('Portal deleted');
+    removeMarker(p.id); closePreview(); renderCards(); renderGrid(); toast('Portal deleted');
   });
 }
 function confirmSheet(title, text, yes, fn) {
@@ -1458,7 +1545,7 @@ function exitPortal() {
   if (recording) return;
   closeModal();
   const toReels = returnToReels; returnToReels = false;
-  const back = P && !toReels ? P : null;
+  const back = P && !toReels && $('gridPage').hidden ? P : null;
   teleporting = false; $('explore').classList.remove('teleporting');
   if (back && current !== back) select(back);
   const el = $('portal');
@@ -1599,14 +1686,13 @@ function drawReel(el, t) {
 }
 function reelLoop(t) { reelRAF = requestAnimationFrame(reelLoop); if (reelActive && !$('reels').hidden) drawReel(reelActive, t); }
 function showReels() {
-  hideProfile(); closePreview();
-  $('reels').hidden = false; renderReels();
-  ['tabExplore', 'tabMe'].forEach((id) => $(id).classList.remove('on')); $('tabReels').classList.add('on');
+  hideProfile(); closePreview(); $('gridPage').hidden = true;
+  $('reels').hidden = false; renderReels(); syncTab();
   cancelAnimationFrame(reelRAF); reelRAF = requestAnimationFrame(reelLoop);
   if (reels.length && !store.get('reelHint', false)) { $('reels').classList.add('hinting'); setTimeout(() => $('reels').classList.remove('hinting'), 4200); store.set('reelHint', true); }
 }
-function hideReels() { $('reels').hidden = true; cancelAnimationFrame(reelRAF); $('tabReels').classList.remove('on'); $('tabExplore').classList.add('on'); }
-$('tabReels').onclick = showReels;
+function hideReels() { $('reels').hidden = true; cancelAnimationFrame(reelRAF); syncTab(); }
+$('tabReels').onclick = () => (haptic(), showReels());
 $('reelFeed').addEventListener('click', (e) => {
   const el = e.target.closest('.reel'); if (!el) return;
   const r = reels[+el.dataset.i], a = e.target.closest('[data-a]')?.dataset.a;
@@ -1620,7 +1706,7 @@ async function stepIntoReel(el, r) {
   el.classList.add('freeze'); haptic('medium');
   await getPano(r.p);
   setTimeout(() => {
-    $('reels').hidden = true; cancelAnimationFrame(reelRAF); $('tabReels').classList.remove('on'); $('tabExplore').classList.add('on');
+    $('reels').hidden = true; cancelAnimationFrame(reelRAF); syncTab();
     el.classList.remove('freeze');
     enterPortal(r.p, { left: rect.left + rect.width / 2 - 60, top: rect.top + rect.height / 2 - 60, width: 120, height: 120 });
     look.yaw = uToYaw(v.u); look.pitch = THREE.MathUtils.clamp(yToPitch(v.y), -.9, .9);
@@ -1633,7 +1719,7 @@ async function stepIntoReel(el, r) {
    ===================================================================== */
 let worldRAF = 0;
 function showProfile() {
-  hideReels();
+  hideReels(); $('gridPage').hidden = true;
   $('pwName').textContent = ME.name; $('pwHandle').textContent = '@' + ME.name.toLowerCase().replace(/\s+/g, '');
   $('stPortals').textContent = portals.length;
   $('stMarks').textContent = portals.reduce((a, p) => a + p.marks.length, 0);
@@ -1643,7 +1729,7 @@ function showProfile() {
   const orbit = $('pwOrbit');
   orbit.innerHTML = portals.map((p) => `<button class="moon own" data-id="${p.id}" style="background-image:url(${p.thumb})" aria-label="${esc(p.title)}"></button>`).join('') || `<div class="pw-empty"><span>🌱</span></div>`;
   orbit.onclick = (e) => { const b = e.target.closest('.moon'); if (!b) return; hideProfile(); teleport(portals.find((x) => x.id === b.dataset.id)); };
-  $('profile').hidden = false; $('tabMe').classList.add('on'); $('tabExplore').classList.remove('on');
+  $('profile').hidden = false; syncTab();
   cancelAnimationFrame(worldRAF);
   const moons = [...orbit.querySelectorAll('.moon')], t0 = performance.now();
   const spin = (t) => {
@@ -1654,9 +1740,9 @@ function showProfile() {
   };
   worldRAF = requestAnimationFrame(spin);
 }
-function hideProfile() { cancelAnimationFrame(worldRAF); $('profile').hidden = true; $('tabMe').classList.remove('on'); $('tabExplore').classList.add('on'); }
+function hideProfile() { cancelAnimationFrame(worldRAF); $('profile').hidden = true; syncTab(); }
 $('meBtn').onclick = showProfile; $('tabMe').onclick = showProfile; $('pfBack').onclick = hideProfile;
-$('tabExplore').onclick = () => { hideProfile(); hideReels(); };
+$('tabExplore').onclick = () => { haptic(); hideProfile(); hideReels(); hideGrid(); };
 $('pfEdit').onclick = () => { hideProfile(); showOnboard(2); };
 $('pfLogout').onclick = () => { try { localStorage.removeItem('portals.profile'); } catch {} ME.name = 'You'; ME.photo = ''; applyProfile(); hideProfile(); showOnboard(1); };
 $('pfWipe').onclick = () => confirmSheet('Delete all your data?', 'Every portal, comment, story and reel on this phone is removed. This cannot be undone.', 'Delete everything', async () => {
@@ -1699,7 +1785,7 @@ $('obDone').onclick = () => {
 const steps = ['intro', 'capture', 'stitch', 'details'];
 function step(name) { steps.forEach((s) => $('step-' + s).classList.toggle('on', s === name)); }
 let capRAF = 0, draft = null;
-function openCreate() { if (mode !== 'explore') return; closePreview(); hideProfile(); hideReels(); $('create').classList.add('show'); step('intro'); }
+function openCreate() { if (mode !== 'explore') return; closePreview(); hideProfile(); hideReels(); $('gridPage').hidden = true; syncTab(); $('create').classList.add('show'); step('intro'); }
 function closeCreate() { cancelAnimationFrame(capRAF); stopCamera(); keepAwake(false); $('create').classList.remove('show'); }
 $('openCreate').addEventListener('click', openCreate);
 document.querySelectorAll('[data-cancel]').forEach((b) => b.addEventListener('click', closeCreate));
@@ -1747,7 +1833,7 @@ async function startCapture() {
   await video.play().catch(() => {});
   const out = canvas(PANO_W, PANO_W / 2);
   const targets = ROWS.flatMap((r, ri) => Array.from({ length: r.n }, (_, k) => ({ row: ri, yaw: k * 360 / r.n, pitch: r.pitch, done: false })));
-  cam = { stream, video, out, octx: out.getContext('2d'), targets, h0: null, R: null, sensors: false, spin: 0, minY: out.height, maxY: 0, started: false, still: 0, lastShot: 0, shots: 0 };
+  cam = { full: false, paused: false, stream, video, out, octx: out.getContext('2d'), targets, h0: null, R: null, sensors: false, spin: 0, minY: out.height, maxY: 0, started: false, still: 0, lastShot: 0, shots: 0 };
   addEventListener('deviceorientation', onCamOri); addEventListener('devicemotion', onCamMotion);
   autoCamera(stream); keepAwake(true);
   step('capture'); runViewfinder();
@@ -1853,17 +1939,26 @@ function takeShot(t) {
   cam.shots++; cam.lastShot = t;
   return true;
 }
+const inPlay = (tg) => cam.full || tg.row === 0;
 const rowDone = (ri) => cam.targets.filter((x) => x.row === ri).every((x) => x.done);
-const activeRow = () => ROWS.findIndex((_, ri) => !rowDone(ri));
+const activeRow = () => ROWS.findIndex((_, ri) => (cam.full || ri === 0) && !rowDone(ri));
+function allDone() { return cam.targets.filter(inPlay).every((x) => x.done); }
+function afterShot() {
+  if (!allDone()) return false;
+  if (cam.full) { finishCapture(); return true; }
+  cam.paused = true; haptic('heavy'); $('vfAsk').hidden = false; return true;
+}
+$('vfMore').addEventListener('click', () => { if (!cam) return; cam.full = true; cam.paused = false; $('vfAsk').hidden = true; paintRows(); haptic(); });
+$('vfDone').addEventListener('click', () => { $('vfAsk').hidden = true; if (cam) finishCapture(); });
 function paintRows() {
-  $('vfRows').innerHTML = ROWS.map((r, ri) => { const all = cam.targets.filter((x) => x.row === ri), d = all.filter((x) => x.done).length; return `<span class="${d === all.length ? 'done' : ri === activeRow() ? 'on' : ''}">${r.name} ${d}/${all.length}</span>`; }).join('');
-  const total = cam.targets.length, d = cam.targets.filter((x) => x.done).length;
+  $('vfRows').innerHTML = ROWS.map((r, ri) => { if (!cam.full && ri) return ''; const all = cam.targets.filter((x) => x.row === ri), d = all.filter((x) => x.done).length; return `<span class="${d === all.length ? 'done' : ri === activeRow() ? 'on' : ''}">${r.name} ${d}/${all.length}</span>`; }).join('');
+  const play = cam.targets.filter(inPlay), total = play.length, d = play.filter((x) => x.done).length;
   $('vfArc').style.strokeDashoffset = 339.3 * (1 - d / total);
-  $('vfFinish').hidden = !rowDone(0) || d === total;
+  $('vfFinish').hidden = !cam.full || d === total;
 }
 function runViewfinder() {
   const cv = $('viewfinder'), ctx = cv.getContext('2d');
-  $('shutter').hidden = false; $('shutter').classList.remove('rec'); $('vfFinish').hidden = true;
+  $('shutter').hidden = false; $('shutter').classList.remove('rec'); $('vfFinish').hidden = true; $('vfAsk').hidden = true;
   $('vfText').textContent = 'Hold the phone upright, at eye level'; $('vfSub').textContent = 'Tap to start';
   paintRows();
   const frame = (t) => {
@@ -1874,12 +1969,12 @@ function runViewfinder() {
     if (vw) {
       const k = Math.max(cv.width / vw, cv.height / vh), ox = (cv.width - vw * k) / 2, oy = (cv.height - vh * k) / 2;
       ctx.drawImage(v, ox, oy, vw * k, vh * k);
-      if (cam.started && cam.R) {
+      if (cam.started && cam.R && !cam.paused) {
         const f = (Math.max(vw, vh) / 2) / Math.tan(LONG_FOV / 2 * DEG), fwd = mul(cam.R, [0, 0, -1]);
         const row = activeRow(), still = !(cam.spin > 22);
         let aimed = null, best = -2, near = null, nearDot = -2;
         for (const tg of cam.targets) {
-          if (tg.done) continue;
+          if (tg.done || !inPlay(tg)) continue;
           const wd = worldDir(cam.h0 + tg.yaw, tg.pitch), dot = wd[0] * fwd[0] + wd[1] * fwd[1] + wd[2] * fwd[2];
           if (tg.row === row && dot > best) { best = dot; aimed = tg; }
           if (dot > nearDot) { nearDot = dot; near = tg; }
@@ -1896,7 +1991,7 @@ function runViewfinder() {
           const nearAng = Math.acos(Math.min(1, nearDot)) / DEG;
           if (nearAng < 3.5 && still) { cam.still += 1; } else cam.still = 0;
           if (cam.still >= 4 && t - cam.lastShot > 350) {
-            if (takeShot(t)) { near.done = true; haptic('medium'); paintRows(); if (cam.targets.every((x) => x.done)) { finishCapture(); return; } }
+            if (takeShot(t)) { near.done = true; haptic('medium'); paintRows(); if (afterShot()) { if (!cam) return; } }
             cam.still = 0;
           }
           const ang = Math.min(Math.acos(Math.min(1, best)) / DEG, nearAng);
@@ -2021,6 +2116,7 @@ function onBack() {
   if (!$('onboard').hidden) { if ($('ob2').classList.contains('on') && !hasProfile()) return showOnboard(1); if (hasProfile()) { $('onboard').hidden = true; return; } return N('App')?.minimizeApp(); }
   if (!$('profile').hidden) return hideProfile();
   if (!$('reels').hidden) return hideReels();
+  if (!$('gridPage').hidden) return hideGrid();
   if (current) return closePreview();
   N('App')?.minimizeApp();
 }
@@ -2245,6 +2341,21 @@ const HE = {
   "Your comment": "התגובה שלך",
   "🗑 Delete comment": "🗑 מחיקת תגובה",
   "Demo: the places are painted and the people are simulated": "הדגמה: המקומות מצוירים והאנשים מדומים",
+  "My portals": "הפורטלים שלי",
+  "Portals": "פורטלים",
+  "Newest": "החדשים",
+  "A–Z": "א–ת",
+  "Most visited": "הכי מבוקרים",
+  "Most comments": "הכי הרבה תגובות",
+  "🌍 Show on the globe": "🌍 להראות על הגלובוס",
+  "🗑 Delete": "🗑 מחיקה",
+  "More": "עוד",
+  "The horizon is done": "האופק מוכן",
+  "Add the sky and the ground for a full sphere? About 40 more seconds.": "להוסיף את השמיים והקרקע לכדור מלא? בערך עוד 40 שניות.",
+  "☁️ Add sky and ground": "☁️ להוסיף שמיים וקרקע",
+  "✓ Finish": "✓ לסיים",
+  "The horizon is enough": "האופק מספיק",
+  "About 20 seconds. After it you choose whether to add the sky and the ground.": "בערך 20 שניות. אחר כך בוחרים אם להוסיף שמיים וקרקע.",
   "visit": "ביקור",
   "visits": "ביקורים",
   "story": "סטורי",
@@ -2376,7 +2487,7 @@ $('pfLang').querySelector('span').textContent = LANG === 'he' ? 'עברית' : '
 /* =====================================================================
    LOOP + START
    ===================================================================== */
-const coverIds = ['profile', 'onboard', 'reels'];
+const coverIds = ['profile', 'onboard', 'reels', 'gridPage'];
 const coveredByScreen = () => mode === 'explore' && ($('create').classList.contains('show') || coverIds.some((id) => !$(id).hidden));
 function loop(t) {
   requestAnimationFrame(loop);
