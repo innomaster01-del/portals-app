@@ -1,5 +1,9 @@
 # Portals – פרויקט האפליקציה (Android)
 
+## הורדה ישירה לטלפון
+https://github.com/innomaster01-del/portals-app/releases/latest/download/portals.apk
+(מתעדכן אוטומטית בכל שינוי שנכנס ל-main)
+
 ## איך מקבלים APK (בלי להתקין כלום במחשב)
 1. ב-GitHub: New repository → שם, למשל `portals` → Create.
 2. Add file → Upload files → לגרור את **כל התוכן** של התיקייה הזו (כולל התיקייה `.github`) → Commit.

@@ -3,6 +3,8 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+permissions:
+  contents: write
 jobs:
   apk:
     runs-on: ubuntu-latest
@@ -30,3 +32,11 @@ jobs:
         with:
           name: portals-apk
           path: android/app/build/outputs/apk/debug/app-debug.apk
+      - name: Publish APK as a direct download
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp android/app/build/outputs/apk/debug/app-debug.apk portals.apk
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest portals.apk --title "Portals – latest test build" --notes "Built from ${GITHUB_SHA::7}. Install on Android: open the file and allow installs from this source." --latest
