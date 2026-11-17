@@ -905,7 +905,7 @@ let portals = [];          // newest first
 let reels = [];
 const keepPin = ({ u, y, name, hue, text, ago, at, likes, liked, e, kind, cap }) => ({ u, y, name, hue, text, ago, at, likes, liked, e, kind, cap });
 function record(p) {
-  return { id: p.id, title: p.title, place: p.place, lat: p.lat, lon: p.lon, approx: p.approx, createdAt: p.createdAt, visits: p.visits || 0, thumb: p.thumb, img: p.img,
+  return { cover: p.cover || null, id: p.id, title: p.title, place: p.place, lat: p.lat, lon: p.lon, approx: p.approx, createdAt: p.createdAt, visits: p.visits || 0, thumb: p.thumb, img: p.img,
     marks: p.marks.map(keepPin), stickers: p.stickers.map(keepPin), windows: p.windows.map(keepPin) };
 }
 const hydrate = (r) => ({ ...r, owner: ME, mine: true, marks: r.marks || [], stickers: r.stickers || [], windows: r.windows || [], canvas: null });
@@ -1263,10 +1263,22 @@ const dirOf = (yaw, pitch) => new THREE.Vector3(-Math.sin(yaw) * Math.cos(pitch)
 let pins = [], hintT = 0, ghost = null, frameN = 0;
 const pointers = new Map(); let pinch = 0;
 
+// For a portal filmed only around the horizon, the view stays where the real picture is:
+// the zoom fits the filmed band and looking up or down stops a little past its edge.
+let FOV_MAX = 100, PITCH = { min: -85 * DEG, max: 85 * DEG };
+function fitView() {
+  const c = P?.cover, base = panoCanvas.clientWidth < panoCanvas.clientHeight ? 82 : 70;
+  if (!c) { FOV_MAX = 100; PITCH = { min: -85 * DEG, max: 85 * DEG }; return base; }
+  const span = c.top - c.bot, fov = Math.max(52, Math.min(base, span - 4));
+  FOV_MAX = Math.max(fov, Math.min(100, span + 6));
+  const slack = 7, hi = c.top - fov / 2 + slack, lo = c.bot + fov / 2 - slack, mid = (c.top + c.bot) / 2;
+  PITCH = hi > lo ? { min: lo * DEG, max: hi * DEG } : { min: mid * DEG, max: mid * DEG };
+  return fov;
+}
 function sizePano() {
   const w = panoCanvas.clientWidth, h = panoCanvas.clientHeight; if (!w) return;
   pR.setSize(w, h, false); pCam.aspect = w / h;
-  pCam.fov = w < h ? 82 : 70; pCam.updateProjectionMatrix();
+  pCam.fov = fitView(); pCam.updateProjectionMatrix();
 }
 function locFromScreen(cx, cy) {
   const r = panoCanvas.getBoundingClientRect();
@@ -1283,12 +1295,12 @@ panoCanvas.addEventListener('pointermove', (e) => {
   if (pointers.has(e.pointerId)) pointers.set(e.pointerId, [e.clientX, e.clientY]);
   if (pointers.size === 2) { // pinch to zoom
     const [a, b] = [...pointers.values()], d = Math.hypot(a[0] - b[0], a[1] - b[1]);
-    if (pinch) { pCam.fov = THREE.MathUtils.clamp(pCam.fov * pinch / d, 40, 100); pCam.updateProjectionMatrix(); }
+    if (pinch) { pCam.fov = THREE.MathUtils.clamp(pCam.fov * pinch / d, 40, FOV_MAX); pCam.updateProjectionMatrix(); }
     pinch = d; return;
   }
   if (!pDrag) return;
   const k = (pCam.fov * DEG) / panoCanvas.clientHeight, dx = e.clientX - pLast[0], dy = e.clientY - pLast[1];
-  look.vy = dx * k; look.vp = dy * k; look.yaw += look.vy; look.pitch = THREE.MathUtils.clamp(look.pitch + look.vp, -85 * DEG, 85 * DEG);
+  look.vy = dx * k; look.vp = dy * k; look.yaw += look.vy; look.pitch = THREE.MathUtils.clamp(look.pitch + look.vp, PITCH.min, PITCH.max);
   pLast = [e.clientX, e.clientY]; dragged += Math.abs(dx) + Math.abs(dy);
   if (dragged > 40) $('hint').style.opacity = 0;
 });
@@ -1300,7 +1312,7 @@ const pEnd = (e) => {
   else if (picker) { picker = false; bottom(); }
 };
 panoCanvas.addEventListener('pointerup', pEnd); panoCanvas.addEventListener('pointercancel', pEnd);
-panoCanvas.addEventListener('wheel', (e) => { pCam.fov = THREE.MathUtils.clamp(pCam.fov + e.deltaY * .03, 40, 100); pCam.updateProjectionMatrix(); }, { passive: true });
+panoCanvas.addEventListener('wheel', (e) => { pCam.fov = THREE.MathUtils.clamp(pCam.fov + e.deltaY * .03, 40, FOV_MAX); pCam.updateProjectionMatrix(); }, { passive: true });
 
 /* ---------- things that live inside a place ---------- */
 function addPin(type, data, fresh = false) {
@@ -1350,7 +1362,7 @@ const fwd = new THREE.Vector3(), pv = new THREE.Vector3();
 function renderPortal(t) {
   frameN++;
   if (recording && !pDrag) look.yaw += .0035;
-  if (!pDrag) { look.yaw += look.vy; look.pitch = THREE.MathUtils.clamp(look.pitch + look.vp, -85 * DEG, 85 * DEG); look.vy *= .93; look.vp *= .93; }
+  if (!pDrag) { look.yaw += look.vy; look.pitch = THREE.MathUtils.clamp(look.pitch + look.vp, PITCH.min, PITCH.max); look.vy *= .93; look.vp *= .93; }
   pCam.rotation.set(look.pitch, look.yaw, 0); pCam.updateMatrixWorld();
   tickWindows(t);
   if (frameN % 8 === 0 && $('gstack').children.length) placeStack();
@@ -1520,7 +1532,7 @@ function loadPortal(p) {
   // doors to your other portals, behind you
   portals.filter((x) => x !== p).slice(0, 3).forEach((to, i) => addPin('door', { to, u: [.25, .12, .38][i], y: .5 }));
   $('hint').style.opacity = 1; clearTimeout(hintT); hintT = setTimeout(() => ($('hint').style.opacity = 0), 4200);
-  sizePano(); header(); bottom();
+  sizePano(); look.pitch = THREE.MathUtils.clamp(0, PITCH.min, PITCH.max); header(); bottom();
   savePortal(p);
 }
 function enterPortal(p, fromRect) {
@@ -1872,7 +1884,7 @@ function warpShot(frame, R, h0, fov, W) {
   const outC = canvas(bw, bh), octx = outC.getContext('2d'), img = octx.createImageData(bw, bh), dst = img.data;
   const sinH = new Float32Array(bw), cosH = new Float32Array(bw);
   for (let x = 0; x < bw; x++) { const hd = (h0 + ((x0 + x + .5) / W - .75) * 360) * DEG; sinH[x] = Math.sin(hd); cosH[x] = Math.cos(hd); }
-  const fx = fw * .12, fy = fh * .08;
+  const fx = fw * .12, fy = fh * .045;
   for (let y = 0; y < bh; y++) {
     const lat = (.5 - (y0 + y + .5) / H) * Math.PI, cl = Math.cos(lat), sl = Math.sin(lat);
     for (let x = 0; x < bw; x++) {
@@ -2130,7 +2142,21 @@ function runViewfinder() {
           ctx.beginPath(); ctx.arc(sx, sy, r, 0, 7);
           ctx.fillStyle = on ? 'rgba(255,255,255,.95)' : 'rgba(255,255,255,.35)'; ctx.shadowColor = '#2ef2cf'; ctx.shadowBlur = on ? 18 : 0; ctx.fill(); ctx.shadowBlur = 0;
         }
-        // where is the next dot, if it is off screen
+        // guide to the next dot: a line when it is on screen, an arrow at the edge when it is not
+        if (aimed) {
+          const wd = worldDir(cam.h0 + aimed.yaw, aimed.pitch), d = mulT(cam.R, wd), cx = cv.width / 2, cy = cv.height / 2;
+          const front = -d[2] > .05, px = front ? ox + (vw / 2 + f * d[0] / -d[2]) * k : 0, py = front ? oy + (vh / 2 - f * d[1] / -d[2]) * k : 0;
+          const onScreen = front && px > 30 * DPR && py > 90 * DPR && px < cv.width - 30 * DPR && py < cv.height - 150 * DPR;
+          const dist = Math.hypot(px - cx, py - cy);
+          ctx.save(); ctx.strokeStyle = 'rgba(46,242,207,.9)'; ctx.fillStyle = '#2ef2cf'; ctx.lineWidth = 3 * DPR; ctx.shadowColor = '#2ef2cf'; ctx.shadowBlur = 12;
+          if (onScreen && dist > 50 * DPR) { ctx.setLineDash([8 * DPR, 8 * DPR]); ctx.beginPath(); ctx.moveTo(cx + (px - cx) * 48 * DPR / dist, cy + (py - cy) * 48 * DPR / dist); ctx.lineTo(px, py); ctx.stroke(); }
+          else if (!onScreen) {
+            let ax = d[0], ay = -d[1]; if (!front && Math.hypot(ax, ay) < .2) ax = 1;      // straight behind: turn right
+            const n = Math.hypot(ax, ay) || 1, ux = ax / n, uy = ay / n, rr = Math.min(cv.width, cv.height) * .3, bx = cx + ux * rr, by = cy + uy * rr, ang = Math.atan2(uy, ux), s2 = 20 * DPR;
+            ctx.translate(bx, by); ctx.rotate(ang); ctx.beginPath(); ctx.moveTo(s2, 0); ctx.lineTo(-s2 * .7, s2 * .75); ctx.lineTo(-s2 * .35, 0); ctx.lineTo(-s2 * .7, -s2 * .75); ctx.closePath(); ctx.fill();
+          }
+          ctx.restore();
+        }
         if (aimed) {
           // any dot you are pointing at gets captured, in whatever order; the hints follow the current row
           const nearAng = Math.acos(Math.min(1, nearDot)) / DEG;
@@ -2141,7 +2167,7 @@ function runViewfinder() {
           }
           const ang = Math.min(Math.acos(Math.min(1, best)) / DEG, nearAng);
           const hp = headingOf(cam.R), want = angDiff(cam.h0 + aimed.yaw, hp.heading), wantP = aimed.pitch - hp.pitch;
-          $('vfText').textContent = ang < 3.2 ? (still ? (cam.dark ? 'It is dark: hold very still…' : 'Hold still…') : 'Slow down, hold still') : Math.abs(wantP) > 12 && Math.abs(want) < 25 ? (wantP > 0 ? 'Tilt up to the dot ↑' : 'Tilt down to the dot ↓') : want > 0 ? 'Turn right to the next dot →' : '← Turn left to the next dot';
+          $('vfText').textContent = ang < 3.2 ? (still ? (cam.dark ? 'It is dark: hold very still…' : 'Hold still…') : 'Slow down, hold still') : Math.abs(wantP) > 8 ? (wantP > 0 ? 'Tilt the phone up ↑' : 'Tilt the phone down ↓') : Math.abs(want) > 4 ? (want > 0 ? 'Turn right → follow the arrow' : '← Turn left, follow the arrow') : 'Almost there, aim at the dot';
           $('vfSub').textContent = ROWS[row].name === 'Horizon' ? 'Turn the phone around itself, not around you' : row === 1 ? 'Now the sky: aim up at the dots' : row === 2 ? 'Now the ground: aim down at the dots' : 'Last one: straight up';
         }
       }
@@ -2162,7 +2188,7 @@ $('vfFinish').addEventListener('click', () => cam && finishCapture());
 // at low resolution: the colour at the edge of the photo flows smoothly into one shared sky / ground
 // colour, and the photo's own edge fades into it, so there is no hard cut and no streaks.
 function fillGaps(c) {
-  const W = c.width, H = c.height, w = 256, h = 128, R = 8;
+  const W = c.width, H = c.height, w = 256, h = 128, R = 3;
   const sm = canvas(w, h), sx = sm.getContext('2d', { willReadFrequently: true }); sx.drawImage(c, 0, 0, w, h);
   const d = sx.getImageData(0, 0, w, h).data, op = (x, y) => d[(y * w + x) * 4 + 3] > 230;
   const T = new Float32Array(w), B = new Float32Array(w), tc = new Float32Array(w * 3), bc = new Float32Array(w * 3);
@@ -2202,6 +2228,8 @@ function fillGaps(c) {
   // straight down is where you stood: a soft dark circle
   const g = o.createLinearGradient(0, H * .9, 0, H); g.addColorStop(0, 'rgba(4,5,11,0)'); g.addColorStop(.6, 'rgba(4,5,11,.7)'); g.addColorStop(1, 'rgba(4,5,11,.95)');
   o.fillStyle = g; o.fillRect(0, H * .9, W, H * .1);
+  let st = 0, sb = 0; for (let x = 0; x < w; x++) { st += Te[x]; sb += Be[x]; }
+  out.cover = { top: (.5 - (st / w + R) / h) * 180, bot: (.5 - (sb / w - R) / h) * 180 };
   return out;
 }
 async function blurFaces(c) {
@@ -2229,7 +2257,7 @@ async function finishCapture() {
   list.forEach((it) => free(it.c)); c.raw.forEach((r) => (r.small = null));
   let faces = -1;
   if ($('fBlur').checked) { $('stitchText').textContent = 'Looking for faces to blur'; faces = await blurFaces(full); }
-  draft = { canvas: full };
+  draft = { canvas: full, cover: full.cover };
   $('stitchText').textContent = faces > 0 ? `Blurred ${faces} ${faces === 1 ? 'face' : 'faces'}` : faces === 0 ? 'No faces found' : 'Opening the portal';
   haptic('heavy');
   setTimeout(() => { step('details'); $('fName').value = ''; $('fPlace').value = ''; runPeek($('peek2'), { canvas: full }); }, 600);
@@ -2278,7 +2306,7 @@ $('detailsForm').addEventListener('submit', async (e) => {
   if (pos) { lat = approx ? Math.round(pos.lat * 100) / 100 + (Math.random() - .5) * .008 : pos.lat; lon = approx ? Math.round(pos.lon * 100) / 100 + (Math.random() - .5) * .008 : pos.lon; }
   else { if (last) { lat = last.lat + (Math.random() - .5) * .02; lon = last.lon + (Math.random() - .5) * .02; } toast('Location is off, so the portal is placed near your last one'); }
   const img = await new Promise((ok) => draft.canvas.toBlob(ok, 'image/jpeg', .9));
-  const p = hydrate({ id: 'p' + Date.now().toString(36), title: $('fName').value.trim() || 'My portal', place: $('fPlace').value.trim(), lat, lon, approx, createdAt: Date.now(), visits: 0, img, thumb: makeThumb(draft.canvas) });
+  const p = hydrate({ cover: draft.cover && draft.cover.top < 80 ? draft.cover : null, id: 'p' + Date.now().toString(36), title: $('fName').value.trim() || 'My portal', place: $('fPlace').value.trim(), lat, lon, approx, createdAt: Date.now(), visits: 0, img, thumb: makeThumb(draft.canvas) });
   p.canvas = draft.canvas; lru.push(p); draft = null;
   portals.unshift(p); await savePortal(p);
   btn.disabled = false;
@@ -2543,6 +2571,11 @@ const HE = {
   "Measuring your camera": "מודדים את המצלמה שלך",
   "Blending the seams": "מחליקים את התפרים",
   "It is dark: hold very still…": "חשוך: להחזיק ממש יציב…",
+  "Tilt the phone up ↑": "להטות את הטלפון למעלה ↑",
+  "Tilt the phone down ↓": "להטות את הטלפון למטה ↓",
+  "Turn right → follow the arrow": "להסתובב ימינה ← לפי החץ",
+  "← Turn left, follow the arrow": "להסתובב שמאלה לפי החץ →",
+  "Almost there, aim at the dot": "כמעט, לכוון לנקודה",
   "visit": "ביקור",
   "visits": "ביקורים",
   "story": "סטורי",
