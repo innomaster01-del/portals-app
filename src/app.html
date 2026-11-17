@@ -1749,21 +1749,22 @@ async function startCapture() {
   const targets = ROWS.flatMap((r, ri) => Array.from({ length: r.n }, (_, k) => ({ row: ri, yaw: k * 360 / r.n, pitch: r.pitch, done: false })));
   cam = { stream, video, out, octx: out.getContext('2d'), targets, h0: null, R: null, sensors: false, spin: 0, minY: out.height, maxY: 0, started: false, still: 0, lastShot: 0, shots: 0 };
   addEventListener('deviceorientation', onCamOri); addEventListener('devicemotion', onCamMotion);
-  keepAwake(true);
+  autoCamera(stream); keepAwake(true);
   step('capture'); runViewfinder();
 }
 $('startCapture').addEventListener('click', startCapture);
 
-// lock exposure and white balance after the first photo so the slices match in brightness
-function lockExposure() {
+// keep the camera on automatic exposure, focus and white balance. Locking exposure made some phones go dark;
+// differences in brightness between photos are matched later, when they are stitched.
+function autoCamera(stream) {
   try {
-    const tr = cam.stream.getVideoTracks()[0], caps = tr.getCapabilities?.() || {}, set = tr.getSettings?.() || {}, adv = {};
-    if (caps.exposureMode?.includes('manual') && set.exposureTime) Object.assign(adv, { exposureMode: 'manual', exposureTime: set.exposureTime });
-    if (caps.whiteBalanceMode?.includes('manual') && set.colorTemperature) Object.assign(adv, { whiteBalanceMode: 'manual', colorTemperature: set.colorTemperature });
+    const tr = stream.getVideoTracks()[0], caps = tr.getCapabilities?.() || {}, adv = {};
+    if (caps.exposureMode?.includes('continuous')) adv.exposureMode = 'continuous';
+    if (caps.whiteBalanceMode?.includes('continuous')) adv.whiteBalanceMode = 'continuous';
+    if (caps.focusMode?.includes('continuous')) adv.focusMode = 'continuous';
     if (Object.keys(adv).length) tr.applyConstraints({ advanced: [adv] }).catch(() => {});
   } catch {}
 }
-
 // project one camera frame onto the panorama (equirectangular), with soft edges for blending
 function warpShot(frame, R, h0) {
   const fw = frame.width, fh = frame.height, src = frame.data, W = cam.out.width, H = cam.out.height;
@@ -1849,7 +1850,6 @@ function takeShot(t) {
   for (const off of [0, -W, W]) cam.octx.drawImage(shot.c, x + off, y);
   cam.octx.restore();
   cam.minY = Math.min(cam.minY, y + shot.h * .08); cam.maxY = Math.max(cam.maxY, y + shot.h * .92);
-  if (!cam.shots) lockExposure();
   cam.shots++; cam.lastShot = t;
   return true;
 }
