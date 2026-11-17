@@ -1302,8 +1302,8 @@ function fitView() {
   const c = P?.cover, base = panoCanvas.clientWidth < panoCanvas.clientHeight ? 82 : 70;
   if (!c) { FOV_MAX = 100; PITCH = { min: -85 * DEG, max: 85 * DEG }; return base; }
   const span = c.top - c.bot, fov = Math.max(52, Math.min(base, span - 4));
-  FOV_MAX = Math.max(fov, Math.min(100, span + 6));
-  const slack = 7, hi = c.top - fov / 2 + slack, lo = c.bot + fov / 2 - slack, mid = (c.top + c.bot) / 2;
+  FOV_MAX = Math.max(fov, Math.min(100, span + 2));
+  const slack = 2, hi = c.top - fov / 2 + slack, lo = c.bot + fov / 2 - slack, mid = (c.top + c.bot) / 2;
   PITCH = hi > lo ? { min: lo * DEG, max: hi * DEG } : { min: mid * DEG, max: mid * DEG };
   return fov;
 }
@@ -2325,6 +2325,8 @@ function solveGains(F, pairs) {
 // so a seam runs along a plain wall instead of cutting through a person or an object.
 function findSeams(lows, pairsIdx, Ws) {
   const seams = new Map();
+  // edge strength at a pixel (difference to the right and lower neighbours)
+  const lum = (d, i, w) => { const r = i + 4, u = i + w * 4, L = (j) => d[j] * .3 + d[j + 1] * .59 + d[j + 2] * .11, l0 = L(i); return Math.abs((d[r + 3] ? L(r) : l0) - l0) + Math.abs((d[u + 3] ? L(u) : l0) - l0); };
   for (const [a, b] of pairsIdx) {
     const A = lows[a], B = lows[b]; if (!A || !B) continue;
     const cA = (.75 + A.lon / 360) * Ws, cB = cA + angDiff(B.lon, A.lon) / 360 * Ws, shiftB = Math.round((cB - (.75 + B.lon / 360) * Ws) / Ws) * Ws;
@@ -2335,15 +2337,20 @@ function findSeams(lows, pairsIdx, Ws) {
       const ia = ((y0 + y - A.y0) * A.w + (x0 + x - ax0)) * 4, ib = ((y0 + y - B.y0) * B.w + (x0 + x - bx0)) * 4;
       const ok = A.d[ia + 3] > 200 && B.d[ib + 3] > 200;
       let c = 1e4;
-      if (ok) { c = 0; for (let k = 0; k < 3; k++) c += Math.abs(A.d[ia + k] * A.gain - B.d[ib + k] * B.gain); c /= 3; }
-      const off = (x0 + x - mid) / (ww / 2); cost[y * ww + x] = c + 6 * off * off;      // a mild pull to the middle of the overlap
+      if (ok) {
+        // colour difference, plus a price for crossing an edge (an object's outline) in either photo:
+        // the cut runs through plain areas where both photos agree, not through things that may be doubled
+        c = 0; for (let k = 0; k < 3; k++) c += Math.abs(A.d[ia + k] * A.gain - B.d[ib + k] * B.gain); c /= 3;
+        const ga = lum(A.d, ia, A.w) * A.gain, gb = lum(B.d, ib, B.w) * B.gain;
+        c = c * 1.5 + .5 * (ga + gb) + Math.abs(ga - gb);
+      }
+      const off = (x0 + x - mid) / (ww / 2); cost[y * ww + x] = c + 2 * off * off;      // a weak pull to the middle of the overlap
     }
     const acc = new Float32Array(ww * hh), from = new Int8Array(ww * hh);
     for (let x = 0; x < ww; x++) acc[x] = cost[x];
     for (let y = 1; y < hh; y++) for (let x = 0; x < ww; x++) {
       let best = acc[(y - 1) * ww + x], bd = 0;
-      if (x > 0 && acc[(y - 1) * ww + x - 1] < best) { best = acc[(y - 1) * ww + x - 1]; bd = -1; }
-      if (x < ww - 1 && acc[(y - 1) * ww + x + 1] < best) { best = acc[(y - 1) * ww + x + 1]; bd = 1; }
+      for (const q of [-1, 1, -2, 2]) { const xx = x + q; if (xx < 0 || xx >= ww) continue; const v = acc[(y - 1) * ww + xx] + (q * q > 1 ? 8 : 0); if (v < best) { best = v; bd = q; } }
       acc[y * ww + x] = best + cost[y * ww + x]; from[y * ww + x] = bd;
     }
     let bx = 0; for (let x = 1; x < ww; x++) if (acc[(hh - 1) * ww + x] < acc[(hh - 1) * ww + bx]) bx = x;
@@ -2568,7 +2575,7 @@ function runViewfinder() {
   const cv = $('viewfinder'), ctx = cv.getContext('2d');
   $('shutter').hidden = false; $('shutter').classList.remove('rec'); $('vfFinish').hidden = true; $('vfAsk').hidden = true; $('vfRetake').hidden = true;
   $('vfMap').getContext('2d').clearRect(0, 0, 480, 240);
-  $('vfText').textContent = 'Hold the phone upright, at eye level'; $('vfSub').textContent = 'Tap to start';
+  $('vfText').textContent = 'Hold the phone upright, at eye level'; $('vfSub').textContent = 'Turn the phone around itself, keep it in one spot · tap to start';
   paintRows();
   const frame = (t) => {
     if (!cam) return;
@@ -2685,8 +2692,10 @@ function fillGaps(c) {
   // straight down is where you stood: a soft dark circle
   const g = o.createLinearGradient(0, H * .9, 0, H); g.addColorStop(0, 'rgba(4,5,11,0)'); g.addColorStop(.6, 'rgba(4,5,11,.7)'); g.addColorStop(1, 'rgba(4,5,11,.95)');
   o.fillStyle = g; o.fillRect(0, H * .9, W, H * .1);
-  let st = 0, sb = 0; for (let x = 0; x < w; x++) { st += Te[x]; sb += Be[x]; }
-  out.cover = { top: (.5 - (st / w + R) / h) * 180, bot: (.5 - (sb / w - R) / h) * 180 };
+  // how far up / down the view may go: where real photo is in almost every direction (not the average,
+  // so turning to the side where the photos are shorter does not show the soft fill)
+  const Ts2 = Array.from(Te).sort((a, b) => a - b), Bs2 = Array.from(Be).sort((a, b) => a - b);
+  out.cover = { top: (.5 - (Ts2[Math.floor(w * .92)] + R) / h) * 180, bot: (.5 - (Bs2[Math.floor(w * .08)] - R) / h) * 180 };
   return out;
 }
 async function blurFaces(c) {
@@ -2861,6 +2870,7 @@ const HE = {
   "Turn a little to the right, then tap. 24 taps for a full circle": "להסתובב קצת ימינה וללחוץ. 24 לחיצות לסיבוב שלם",
   "Practice run (no camera)": "סיבוב תרגול (אין מצלמה)",
   "Tap to start": "ללחוץ כדי להתחיל",
+  "Turn the phone around itself, keep it in one spot · tap to start": "לסובב את הטלפון סביב עצמו ולהשאיר אותו באותה נקודה · ללחוץ כדי להתחיל",
   "Filling the sky and the ground": "משלימים את השמיים והקרקע",
   "Looking for faces to blur": "מחפשים פנים לטשטוש",
   "No faces found": "לא נמצאו פנים",
