@@ -682,6 +682,7 @@ button.mark{text-align:left}
 #create.show ~ #toastHost .toast{top:auto;bottom:calc(150px + var(--sab))}
 .x{margin-inline-start:.06em;background:linear-gradient(120deg,var(--teal),var(--violet) 55%,var(--pink));-webkit-background-clip:text;background-clip:text;color:transparent;font-weight:800}
 [dir=rtl] .brand,[dir=rtl] .splash-word{direction:ltr}
+.stitch-info{position:absolute;left:0;right:0;top:calc(10px + var(--sat));text-align:center;font-size:.72rem;color:var(--muted);padding:0 50px}
 .reel-empty{height:100%;display:grid;place-content:center;justify-items:center;gap:10px;text-align:center;padding:30px}
 .reel-empty span{font-size:3rem}.reel-empty b{font-family:var(--head);font-size:1.3rem}
 .pf-stats{margin-top:4px}
@@ -722,7 +723,7 @@ button.mark{text-align:left}
   <div class="pf-world" id="pfWorld"><div class="pw-stars"></div><div class="planet"><span id="pwCenter"></span></div><div class="orbit" id="pwOrbit"></div></div>
   <div class="pw-info"><h2 id="pwName" dir="auto"></h2><p class="muted" id="pwHandle"></p></div>
   <div class="pf-stats"><div><b id="stPortals"></b><small>🌍 Portals</small></div><div><b id="stMarks"></b><small>💬 Comments</small></div><div><b id="stStories"></b><small>🪟 Stories</small></div><div><b id="stVisits"></b><small>👣 Visits</small></div></div>
-  <div class="pf-list"><button id="pfLang">🌐 Language<span>English</span></button><button id="pfLogout">↩ Sign out</button><button id="pfWipe">🗑 Delete all my data</button></div>
+  <div class="pf-list"><button id="pfLang">🌐 Language<span>English</span></button><button id="pfLogout">↩ Sign out</button><button id="pfExport">📦 Send my last capture for checking</button><button id="pfWipe">🗑 Delete all my data</button></div>
 </section>
 
 <main id="explore">
@@ -818,6 +819,7 @@ button.mark{text-align:left}
   </div>
 
   <div class="step" id="step-details">
+    <div class="stitch-info" id="stitchInfo" hidden></div>
     <button class="icon-btn x" data-cancel aria-label="Cancel">✕</button>
     <div class="peek"><div class="ring"></div><canvas id="peek2" width="400" height="400"></canvas><div class="ring2"></div></div>
     <form class="form" id="detailsForm">
@@ -1882,6 +1884,9 @@ document.querySelectorAll('[data-cancel]').forEach((b) => b.addEventListener('cl
    points at it and the phone is still, then projects that camera frame onto the sphere using the
    full rotation of the phone (yaw, pitch and roll), slides it to match what is already there, and
    blends it in. */
+let LENS_K1 = 0;                           // barrel / pincushion distortion of the lens, measured with the field of view
+// a pixel's position without lens distortion (normalised by the focal length)
+function undistort(xd, yd, k) { let xu = xd, yu = yd; for (let i = 0; i < 4; i++) { const s = 1 + k * (xu * xu + yu * yu); xu = xd / s; yu = yd / s; } return [xu, yu]; }
 let LONG_FOV = 66;                         // field of view along the long side of the video; measured per phone on the first photos
 const ROWS = [{ name: 'Horizon', pitch: 0, n: 12 }, { name: 'Sky', pitch: 45, n: 8 }, { name: 'Ground', pitch: -45, n: 8 }, { name: 'Top', pitch: 85, n: 1 }];
 let cam = null;
@@ -1921,6 +1926,7 @@ async function startCapture() {
   await video.play().catch(() => {});
   const targets = ROWS.flatMap((r, ri) => Array.from({ length: r.n }, (_, k) => ({ row: ri, yaw: k * 360 / r.n, pitch: r.pitch, done: false })));
   if (store.get('fov', 0)) LONG_FOV = store.get('fov', 66);
+  LENS_K1 = store.get('k1', 0);
   cam = { D: [1, 0, 0, 0, 1, 0, 0, 0, 1], raw: [], pending: [], dark: false, full: false, paused: false, stream, video, targets, h0: null, R: null, sensors: false, spin: 0, started: false, still: 0, lastShot: 0, shots: 0 };
   addEventListener('deviceorientation', onCamOri); addEventListener('devicemotion', onCamMotion);
   autoCamera(stream); keepAwake(true);
@@ -1940,10 +1946,10 @@ function autoCamera(stream) {
   } catch {}
 }
 // project one camera frame onto the panorama (equirectangular), with soft edges for blending
-function warpShot(frame, R, h0, fov, W) {
+function warpShot(frame, R, h0, fov, W, K = LENS_K1) {
   const fw = frame.width, fh = frame.height, src = frame.data, H = W / 2;
   const f = (Math.max(fw, fh) / 2) / Math.tan(fov / 2 * DEG), cxp = fw / 2, cyp = fh / 2;
-  const toPano = (u, v) => { const w = mul(R, [u - cxp, -(v - cyp), -f]), n = Math.hypot(...w); const hd = Math.atan2(w[0], w[1]) / DEG, lat = Math.asin(w[2] / n) / DEG; return [angDiff(hd, h0), lat]; };
+  const toPano = (u, v) => { const [xu, yu] = undistort((u - cxp) / f, -(v - cyp) / f, K), w = mul(R, [xu * f, yu * f, -f]), n = Math.hypot(...w); const hd = Math.atan2(w[0], w[1]) / DEG, lat = Math.asin(w[2] / n) / DEG; return [angDiff(hd, h0), lat]; };
   const centre = toPano(cxp, cyp);
   let lonMin = Infinity, lonMax = -Infinity, latMin = 90, latMax = -90;
   for (let i = 0; i <= 40; i++) for (const [u, v] of [[i / 40 * fw, 0], [i / 40 * fw, fh], [0, i / 40 * fh], [fw, i / 40 * fh]]) {
@@ -1965,7 +1971,7 @@ function warpShot(frame, R, h0, fov, W) {
       const wx = cl * sinH[x], wy = cl * cosH[x], wz = sl;
       const dx = R[0] * wx + R[3] * wy + R[6] * wz, dy = R[1] * wx + R[4] * wy + R[7] * wz, dz = -(R[2] * wx + R[5] * wy + R[8] * wz);
       if (dz <= 0) continue;
-      const u = cxp + f * dx / dz, v = cyp - f * dy / dz;
+      const xn = dx / dz, yn = dy / dz, sk = 1 + K * (xn * xn + yn * yn), u = cxp + f * xn * sk, v = cyp - f * yn * sk;
       if (u < 0 || v < 0 || u >= fw - 1 || v >= fh - 1) continue;
       let a = Math.min(1, Math.min(u, fw - 1 - u) / fx) * Math.min(1, Math.min(v, fh - 1 - v) / fy); a = a * a * (3 - 2 * a);
       const iu = u | 0, iv = v | 0, du = u - iu, dv = v - iv, i0 = (iv * fw + iu) * 4, i1 = i0 + fw * 4, o = (y * bw + x) * 4;
@@ -2182,7 +2188,7 @@ function extractFeatures(img, maxN = 700) {
   const pts = new Float32Array(kps.length * 2); kps.forEach((k, i) => { pts[i * 2] = k.x; pts[i * 2 + 1] = k.y; });
   return { w, h, n: kps.length, pts, desc: new Uint32Array(desc.data.buffer, desc.data.byteOffset, kps.length * 8), gray: gray.data.slice() };
 }
-const rayOf = (x, y, w, h, f) => { const v = [x - w / 2, -(y - h / 2), -f], n = Math.hypot(v[0], v[1], v[2]); return [v[0] / n, v[1] / n, v[2] / n]; };
+const rayOf = (x, y, w, h, f, K = LENS_K1) => { const [xu, yu] = undistort((x - w / 2) / f, -(y - h / 2) / f, K), n = Math.hypot(xu, yu, 1); return [xu / n, yu / n, -1 / n]; };
 const focalOf = (w, h, fov) => (Math.max(w, h) / 2) / Math.tan(fov / 2 * DEG);
 const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
@@ -2260,13 +2266,14 @@ function solveLinear(H, g) {   // Gaussian elimination with partial pivoting; H 
 // Bundle adjustment ("ray" cost, as in OpenCV): every matched point must point the same way from both
 // photos. Unknowns: a small rotation for every photo and the lens field of view. A weak pull towards the
 // sensor rotations keeps the horizon level.
-function bundleAdjust(F, Rs0, pairs, fov0, fixFocal = false) {
-  const N = F.length, P = 3 * N + 1, Rs = Rs0.map((R) => R.slice()), Om = Array.from({ length: N }, () => [0, 0, 0]);
+function bundleAdjust(F, Rs0, pairs, fov0, fixFocal = false, k0 = LENS_K1) {
+  let kd = k0;
+  const N = F.length, P = 3 * N + 2, Rs = Rs0.map((R) => R.slice()), Om = Array.from({ length: N }, () => [0, 0, 0]);
   let lf = Math.log(focalOf(1, 1, fov0)), lambda = 1e-3;
   const obs = []; for (const pr of pairs) { const m = pr.m.length > 90 ? pr.m.filter((_, k) => k % Math.ceil(pr.m.length / 90) === 0) : pr.m; for (const [i, j] of m) obs.push([pr.a, i, pr.b, j]); }
-  const rays = (k, idx, lfv) => { const A = F[k], f = Math.exp(lfv) * Math.max(A.w, A.h); return rayOf(A.pts[idx * 2], A.pts[idx * 2 + 1], A.w, A.h, f); };
+  const rays = (k, idx, lfv, kk = kd) => { const A = F[k], f = Math.exp(lfv) * Math.max(A.w, A.h); return rayOf(A.pts[idx * 2], A.pts[idx * 2 + 1], A.w, A.h, f, kk); };
   const HUB = 3 / (Math.exp(lf) * 640), MU = 1;
-  const cost = (R, lfv) => { let s = 0; for (const [a, i, b, j] of obs) { const r = mat3v(R[a], rays(a, i, lfv)), q = mat3v(R[b], rays(b, j, lfv)), e = Math.hypot(r[0] - q[0], r[1] - q[1], r[2] - q[2]); s += e < HUB ? e * e : 2 * HUB * e - HUB * HUB; } return s; };
+  const cost = (R, lfv, kk = kd) => { let s = 0; for (const [a, i, b, j] of obs) { const r = mat3v(R[a], rays(a, i, lfv, kk)), q = mat3v(R[b], rays(b, j, lfv, kk)), e = Math.hypot(r[0] - q[0], r[1] - q[1], r[2] - q[2]); s += e < HUB ? e * e : 2 * HUB * e - HUB * HUB; } return s; };
   let cur = cost(Rs, lf);
   for (let iter = 0; iter < 40; iter++) {
     const H = Array.from({ length: P }, () => new Float64Array(P)), g = new Float64Array(P), eps = 1e-5;
@@ -2279,23 +2286,24 @@ function bundleAdjust(F, Rs0, pairs, fov0, fixFocal = false) {
       const Ja = sk(va, -1), Jb = sk(vb, 1);                  // d r / d(rotation of a), d r / d(rotation of b)
       const cols = []; for (let c = 0; c < 3; c++) { cols.push([3 * a + c, [Ja[0][c], Ja[1][c], Ja[2][c]]]); cols.push([3 * b + c, [Jb[0][c], Jb[1][c], Jb[2][c]]]); }
       cols.push([P - 1, Jf]);
+      if (!fixFocal) { const va3 = mat3v(Rs[a], rays(a, i, lf, kd + 1e-4)), vb3 = mat3v(Rs[b], rays(b, j, lf, kd + 1e-4)); cols.push([P - 2, [((va3[0] - vb3[0]) - r[0]) / 1e-4, ((va3[1] - vb3[1]) - r[1]) / 1e-4, ((va3[2] - vb3[2]) - r[2]) / 1e-4]]); }
       for (const [p, jp] of cols) { g[p] += w * dot3(jp, r); for (const [q, jq] of cols) H[p][q] += w * dot3(jp, jq); }
     }
     for (let k = 0; k < N; k++) for (let c = 0; c < 3; c++) { H[3 * k + c][3 * k + c] += MU; g[3 * k + c] += MU * Om[k][c]; }
-    if (fixFocal) H[P - 1][P - 1] += 1;
+    if (fixFocal) { H[P - 1][P - 1] += 1; H[P - 2][P - 2] += 1; } else H[P - 2][P - 2] += .01 + 50 * 0;
     for (let p = 0; p < P; p++) H[p][p] *= 1 + lambda;
     const step = solveLinear(H.map((r) => Array.from(r)), Array.from(g, (v) => -v)); if (!step) break;
-    const R2 = Rs.map((R, k) => mat3m(expRot([step[3 * k], step[3 * k + 1], step[3 * k + 2]]), R)), lf2 = lf + step[P - 1];
-    const c2 = cost(R2, lf2);
+    const R2 = Rs.map((R, k) => mat3m(expRot([step[3 * k], step[3 * k + 1], step[3 * k + 2]]), R)), lf2 = lf + step[P - 1], kd2 = Math.max(-.35, Math.min(.35, kd + step[P - 2]));
+    const c2 = cost(R2, lf2, kd2);
     if (c2 < cur) {
       for (let k = 0; k < N; k++) { Rs[k] = R2[k]; Om[k][0] += step[3 * k]; Om[k][1] += step[3 * k + 1]; Om[k][2] += step[3 * k + 2]; }
-      lf = lf2; const gain = (cur - c2) / cur; cur = c2; lambda = Math.max(1e-7, lambda / 4);
+      lf = lf2; kd = kd2; const gain = (cur - c2) / cur; cur = c2; lambda = Math.max(1e-7, lambda / 4);
       if (gain < 1e-5) break;
     } else lambda *= 8;
   }
   const f = Math.exp(lf), fov = 2 * Math.atan(.5 / f) / DEG;
   let s = 0; for (const [a, i, b, j] of obs) { const r = mat3v(Rs[a], rays(a, i, lf)), q = mat3v(Rs[b], rays(b, j, lf)); s += Math.acos(Math.min(1, dot3(r, q))); }
-  return { Rs, fov, rms: obs.length ? s / obs.length / DEG : 0, n: obs.length };
+  return { Rs, fov, k1: kd, rms: obs.length ? s / obs.length / DEG : 0, n: obs.length };
 }
 // gain compensation: one brightness factor per photo so that shared points match. Solved on the log of
 // the brightness ratio per pair of photos (weighted by how many points they share), which has no pull
@@ -2394,17 +2402,17 @@ async function stitchAll(rawAll, h0) {
       const closed = hzI.length >= 8 && hzI.every((x, k) => has(x, hzI[(k + 1) % hzI.length]));
       const known = store.get('fovOk', false) && store.get('fov', 0);
       if (!closed && known) LONG_FOV = known;
-      const ba = bundleAdjust(F, start, pairs, LONG_FOV, !closed);
+      const ba = bundleAdjust(F, start, pairs, LONG_FOV, !closed, LENS_K1);
       // level the horizon by gravity (the accelerometer is reliable even where the compass is not)
       let up = [0, 0, 0]; shots.forEach((s, i) => { const u = mat3v(ba.Rs[i], [s.R[6], s.R[7], s.R[8]]); up[0] += u[0]; up[1] += u[1]; up[2] += u[2]; });
       up = norm3(up); const ax = cross3(up, [0, 0, 1]), sn = Math.hypot(...ax);
       if (sn > 1e-9) { const G = expRot(ax.map((v) => v / sn * Math.asin(Math.min(1, sn)))); ba.Rs = ba.Rs.map((R) => mat3m(G, R)); }
       window.__engine.closed = closed;
-      window.__engine.ba = { fov: ba.fov, rms: ba.rms, n: ba.n };
+      window.__engine.ba = { fov: ba.fov, k1: ba.k1, rms: ba.rms, n: ba.n };
       if (ba.fov > 45 && ba.fov < 95 && ba.rms < .6) {
-        Rs = ba.Rs; LONG_FOV = Math.round(ba.fov * 100) / 100; engine = true;
+        Rs = ba.Rs; LONG_FOV = Math.round(ba.fov * 100) / 100; if (closed) LENS_K1 = Math.round(ba.k1 * 1e4) / 1e4; engine = true;
         gains = solveGains(F, pairs);
-        if (closed) { store.set('fov', LONG_FOV); store.set('fovOk', true); }
+        if (closed) { store.set('fov', LONG_FOV); store.set('fovOk', true); store.set('k1', LENS_K1); }
       }
     }
   }
@@ -2441,6 +2449,7 @@ async function stitchAll(rawAll, h0) {
     seams = { map: findSeams(lows, nb, Ws), scale: W / Ws, nb };
   }
   let minY = H, maxY = 0; list.forEach((x) => { minY = Math.min(minY, x.y + x.c.height * .06); maxY = Math.max(maxY, x.y + x.c.height * .94); });
+  window.__engine = { ...(window.__engine || {}), used: engine, fov: LONG_FOV, k1: LENS_K1, shots: shots.length };
   return { mosaic, list, minY, maxY, seams };
 }
 // Final picture: every spot comes from the one photo whose centre is closest to it, with a narrow
@@ -2495,6 +2504,10 @@ function composeSeams(base, list, seams) {
     tctx.restore();
   });
   // the cross-faded picture stays underneath, only where no single photo covers a spot
+  // where photos were laid over each other with soft edges the sum can be a little under fully opaque;
+  // make it fully opaque (the colour already is the weighted average), so nothing from underneath shows through
+  { const BH = 128, x2 = top.getContext('2d', { willReadFrequently: true });
+    for (let y0 = 0; y0 < H; y0 += BH) { const bh = Math.min(BH, H - y0), P = x2.getImageData(0, y0, W, bh), d = P.data; for (let i = 3; i < d.length; i += 4) d[i] = d[i] >= 10 ? 255 : 0; x2.putImageData(P, 0, y0); } }
   tctx.globalCompositeOperation = 'destination-over'; tctx.drawImage(base, 0, 0); tctx.globalCompositeOperation = 'source-over';
   free(base);
   smoothColour(top, list);
@@ -2704,9 +2717,61 @@ async function finishCapture() {
   let faces = -1;
   if ($('fBlur').checked) { $('stitchText').textContent = 'Looking for faces to blur'; faces = await blurFaces(full); }
   draft = { canvas: full, cover: full.cover };
+  const E = window.__engine || {};
+  $('stitchInfo').hidden = false;
+  $('stitchInfo').textContent = E.used ? `Precise alignment · ${E.shots} photos · ${E.ba?.n || 0} matched points · lens ${(+E.fov).toFixed(1)}°` : `Basic alignment · ${E.shots || 0} photos · too few matching details`;
+  saveLastCapture(c);
   $('stitchText').textContent = faces > 0 ? `Blurred ${faces} ${faces === 1 ? 'face' : 'faces'}` : faces === 0 ? 'No faces found' : 'Opening the portal';
   haptic('heavy');
   setTimeout(() => { step('details'); $('fName').value = ''; $('fPlace').value = ''; runPeek($('peek2'), { canvas: full }); }, 600);
+}
+
+/* ---------- the last capture is kept, so it can be sent for checking ---------- */
+async function saveLastCapture(c) {
+  try {
+    const v = c.video || {};
+    await idbSet('lastCapture', { at: Date.now(), h0: c.h0, fov: LONG_FOV, k1: LENS_K1, engine: window.__engine || null, ua: navigator.userAgent, video: [v.videoWidth || 0, v.videoHeight || 0],
+      shots: c.raw.map((s) => ({ R: s.R, Rc: s.Rc, row: s.row, yaw: s.yaw, ti: s.ti, ok: s.ok, sharp: s.sharp, blob: s.blob })) });
+  } catch (err) { console.warn('could not keep the capture', err); }
+}
+const CRC = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+const crc32 = (b) => { let c = 0xFFFFFFFF; for (let i = 0; i < b.length; i++) c = CRC[(c ^ b[i]) & 255] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
+// a plain zip file (no compression): meta.json and one jpeg per photo
+function makeZip(files) {
+  const enc = new TextEncoder(), parts = [], central = []; let off = 0;
+  for (const [name, data] of files) {
+    const nm = enc.encode(name), crc = crc32(data), h = new DataView(new ArrayBuffer(30));
+    h.setUint32(0, 0x04034b50, true); h.setUint16(4, 20, true); h.setUint32(14, crc, true); h.setUint32(18, data.length, true); h.setUint32(22, data.length, true); h.setUint16(26, nm.length, true);
+    parts.push(new Uint8Array(h.buffer), nm, data);
+    const c = new DataView(new ArrayBuffer(46)); c.setUint32(0, 0x02014b50, true); c.setUint16(4, 20, true); c.setUint16(6, 20, true); c.setUint32(16, crc, true); c.setUint32(20, data.length, true); c.setUint32(24, data.length, true); c.setUint16(28, nm.length, true); c.setUint32(42, off, true);
+    central.push(new Uint8Array(c.buffer), nm); off += 30 + nm.length + data.length;
+  }
+  const csize = central.reduce((a, x) => a + x.length, 0), e = new DataView(new ArrayBuffer(22));
+  e.setUint32(0, 0x06054b50, true); e.setUint16(8, files.length, true); e.setUint16(10, files.length, true); e.setUint32(12, csize, true); e.setUint32(16, off, true);
+  return new Blob([...parts, ...central, new Uint8Array(e.buffer)], { type: 'application/zip' });
+}
+async function exportLastCapture() {
+  const cap = await idbGet('lastCapture').catch(() => null);
+  if (!cap) return toast('No capture yet. Open a portal with the camera first');
+  toast('Preparing the capture file…');
+  const files = [], meta = { ...cap, shots: cap.shots.map(({ blob, ...r }, i) => ({ ...r, file: `shot_${String(i).padStart(2, '0')}.jpg` })) };
+  files.push(['meta.json', new TextEncoder().encode(JSON.stringify(meta, null, 1))]);
+  for (let i = 0; i < cap.shots.length; i++) if (cap.shots[i].blob) files.push([meta.shots[i].file, new Uint8Array(await cap.shots[i].blob.arrayBuffer())]);
+  await shareFile(makeZip(files), `portalx-capture-${new Date(cap.at).toISOString().slice(0, 16).replace(/[:T]/g, '-')}.zip`, 'Portal X capture');
+}
+$('pfExport').onclick = exportLastCapture;
+// for checking a capture someone sent: run the exact same stitching again on its photos
+async function restitch(cap) {
+  const raw = [];
+  for (const s of cap.shots) {
+    const bmp = await createImageBitmap(s.blob), k = Math.min(1, 640 / Math.max(bmp.width, bmp.height)), c = canvas(Math.round(bmp.width * k), Math.round(bmp.height * k)), x = c.getContext('2d', { willReadFrequently: true });
+    x.drawImage(bmp, 0, 0, c.width, c.height); bmp.close?.();
+    raw.push({ ...s, small: x.getImageData(0, 0, c.width, c.height), ok: s.ok !== false });
+  }
+  if (cap.fov) { LONG_FOV = cap.fov; }
+  const { mosaic, list, seams: si } = await stitchAll(raw, cap.h0);
+  const seams = list.length > 1 ? composeSeams(mosaic, list, si) : mosaic;
+  return fillGaps(seams);
 }
 
 /* your own photo becomes the place: a real 360 is used as is, a panorama or normal photo is wrapped around you */
@@ -3046,6 +3111,9 @@ const HE = {
   "Lining up every photo": "מיישרים כל תמונה",
   "Choosing the seams": "בוחרים איפה לחבר",
   "That one does not overlap the last photo. Aim at the dot again": "התמונה לא חופפת לקודמת. לכוון שוב לנקודה",
+  "📦 Send my last capture for checking": "📦 שליחת הצילום האחרון לבדיקה",
+  "No capture yet. Open a portal with the camera first": "עוד אין צילום. קודם פותחים פורטל עם המצלמה",
+  "Preparing the capture file…": "מכינים את קובץ הצילום…",
   "visit": "ביקור",
   "visits": "ביקורים",
   "story": "סטורי",
@@ -3199,7 +3267,7 @@ document.addEventListener('visibilitychange', () => { if (document.hidden && cam
     if (!prof?.name) showOnboard(1);
   }, 1200);
 })();
-window.__portals = { get calib() { return calibLog; }, get draft() { return draft; }, get look() { return look; },  get portals() { return portals; }, get reels() { return reels; }, get cam() { return cam; }, takeShot: (t) => takeShot(t), set align(v) { ALIGN = v; }, onBack, share360, withGPano };
+window.__portals = { restitch, makeZip, get calib() { return calibLog; }, get draft() { return draft; }, get look() { return look; },  get portals() { return portals; }, get reels() { return reels; }, get cam() { return cam; }, takeShot: (t) => takeShot(t), set align(v) { ALIGN = v; }, onBack, share360, withGPano };
 </script>
 </body>
 </html>
