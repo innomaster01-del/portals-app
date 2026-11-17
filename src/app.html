@@ -1794,8 +1794,8 @@ document.querySelectorAll('[data-cancel]').forEach((b) => b.addEventListener('cl
    points at it and the phone is still, then projects that camera frame onto the sphere using the
    full rotation of the phone (yaw, pitch and roll), slides it to match what is already there, and
    blends it in. */
-const LONG_FOV = 66;                       // field of view along the long side of the video, in degrees
-const ROWS = [{ name: 'Horizon', pitch: 0, n: 18 }, { name: 'Sky', pitch: 45, n: 9 }, { name: 'Ground', pitch: -45, n: 9 }, { name: 'Top', pitch: 85, n: 1 }];
+let LONG_FOV = 66;                         // field of view along the long side of the video; measured per phone on the first photos
+const ROWS = [{ name: 'Horizon', pitch: 0, n: 12 }, { name: 'Sky', pitch: 45, n: 8 }, { name: 'Ground', pitch: -45, n: 8 }, { name: 'Top', pitch: 85, n: 1 }];
 let cam = null;
 // W3C device orientation -> rotation matrix (device -> world; world x = east, y = north, z = up)
 function rotationOf(e) {
@@ -1825,15 +1825,15 @@ async function startCapture() {
   const oriAsk = typeof D?.requestPermission === 'function' ? D.requestPermission().catch(() => 'denied') : Promise.resolve('granted');
   let stream;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } } });
+    stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1600 }, height: { ideal: 1200 }, aspectRatio: { ideal: 4 / 3 } } });
   } catch (err) { toast(err?.name === 'NotAllowedError' ? 'Camera permission is needed to open a portal' : 'No camera found on this device'); return; }
   await oriAsk;
   const video = document.createElement('video');
   video.playsInline = true; video.muted = true; video.srcObject = stream;
   await video.play().catch(() => {});
-  const out = canvas(PANO_W, PANO_W / 2);
   const targets = ROWS.flatMap((r, ri) => Array.from({ length: r.n }, (_, k) => ({ row: ri, yaw: k * 360 / r.n, pitch: r.pitch, done: false })));
-  cam = { full: false, paused: false, stream, video, out, octx: out.getContext('2d'), targets, h0: null, R: null, sensors: false, spin: 0, minY: out.height, maxY: 0, started: false, still: 0, lastShot: 0, shots: 0 };
+  if (store.get('fov', 0)) LONG_FOV = store.get('fov', 66);
+  cam = { raw: [], pending: [], dark: false, full: false, paused: false, stream, video, targets, h0: null, R: null, sensors: false, spin: 0, started: false, still: 0, lastShot: 0, shots: 0 };
   addEventListener('deviceorientation', onCamOri); addEventListener('devicemotion', onCamMotion);
   autoCamera(stream); keepAwake(true);
   step('capture'); runViewfinder();
@@ -1852,9 +1852,9 @@ function autoCamera(stream) {
   } catch {}
 }
 // project one camera frame onto the panorama (equirectangular), with soft edges for blending
-function warpShot(frame, R, h0) {
-  const fw = frame.width, fh = frame.height, src = frame.data, W = cam.out.width, H = cam.out.height;
-  const f = (Math.max(fw, fh) / 2) / Math.tan(LONG_FOV / 2 * DEG), cxp = fw / 2, cyp = fh / 2;
+function warpShot(frame, R, h0, fov, W) {
+  const fw = frame.width, fh = frame.height, src = frame.data, H = W / 2;
+  const f = (Math.max(fw, fh) / 2) / Math.tan(fov / 2 * DEG), cxp = fw / 2, cyp = fh / 2;
   const toPano = (u, v) => { const w = mul(R, [u - cxp, -(v - cyp), -f]), n = Math.hypot(...w); const hd = Math.atan2(w[0], w[1]) / DEG, lat = Math.asin(w[2] / n) / DEG; return [angDiff(hd, h0), lat]; };
   const centre = toPano(cxp, cyp);
   let lonMin = Infinity, lonMax = -Infinity, latMin = 90, latMax = -90;
@@ -1862,7 +1862,6 @@ function warpShot(frame, R, h0) {
     const [lo, la] = toPano(u, v), d = angDiff(lo, centre[0]);
     lonMin = Math.min(lonMin, d); lonMax = Math.max(lonMax, d); latMin = Math.min(latMin, la); latMax = Math.max(latMax, la);
   }
-  // a pole inside the frame means the photo wraps all the way round
   for (const z of [1, -1]) { const d = mulT(R, [0, 0, z]); if (-d[2] > 0) { const u = cxp + f * d[0] / -d[2], v = cyp - f * d[1] / -d[2]; if (u > 0 && u < fw && v > 0 && v < fh) { lonMin = -180; lonMax = 180; if (z > 0) latMax = 90; else latMin = -90; } } }
   const full = lonMax - lonMin >= 359;
   const x0 = full ? 0 : Math.floor((.75 + (centre[0] + lonMin) / 360) * W), x1 = full ? W : Math.ceil((.75 + (centre[0] + lonMax) / 360) * W);
@@ -1871,7 +1870,7 @@ function warpShot(frame, R, h0) {
   const outC = canvas(bw, bh), octx = outC.getContext('2d'), img = octx.createImageData(bw, bh), dst = img.data;
   const sinH = new Float32Array(bw), cosH = new Float32Array(bw);
   for (let x = 0; x < bw; x++) { const hd = (h0 + ((x0 + x + .5) / W - .75) * 360) * DEG; sinH[x] = Math.sin(hd); cosH[x] = Math.cos(hd); }
-  const fx = fw * .16, fy = fh * .1;
+  const fx = fw * .12, fy = fh * .08;
   for (let y = 0; y < bh; y++) {
     const lat = (.5 - (y0 + y + .5) / H) * Math.PI, cl = Math.cos(lat), sl = Math.sin(lat);
     for (let x = 0; x < bw; x++) {
@@ -1887,57 +1886,160 @@ function warpShot(frame, R, h0) {
     }
   }
   octx.putImageData(img, 0, 0);
-  return { c: outC, x0, y0, w: bw, h: bh };
+  return { c: outC, x0, y0, w: bw, h: bh, lon: centre[0], lat: centre[1] };
 }
-// Finds the shift (and brightness) that best fits a new slice onto what is already painted.
-// Coarse search at 1/8 size, then a fine one at 1/2 size around the best coarse answer.
-function alignStrip(strip, x0, y0, dw, dh) {
-  const out = cam.out, W = out.width, H = out.height;
+// Finds the shift that best fits a new photo onto what is already painted. It compares edges, not
+// brightness (normalised cross-correlation of gradients), so it still works in the dark and when
+// exposure changes. Coarse search at 1/8 size, then a fine one at 1/2 size.
+function alignStrip(strip, x0, y0, dw, dh, mosaic) {
+  const W = mosaic.width, H = mosaic.height;
+  const prep = (data, w, h) => {
+    const L = new Float32Array(w * h), M = new Uint8Array(w * h), A = new Uint8Array(w * h), G = new Float32Array(w * h);
+    for (let i = 0, j = 0; j < w * h; i += 4, j++) { L[j] = data[i] * .3 + data[i + 1] * .59 + data[i + 2] * .11; M[j] = data[i + 3] > 60 ? 1 : 0; }
+    // a pixel counts only if it and its four neighbours are painted (separate mask, so nothing cascades)
+    for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) { const j = y * w + x; if (M[j] & M[j - 1] & M[j + 1] & M[j - w] & M[j + w]) { A[j] = 1; G[j] = Math.abs(L[j + 1] - L[j - 1]) + Math.abs(L[j + w] - L[j - w]); } }
+    return { L, A, G };
+  };
   const search = (k, cx, cy, mx, my) => {
-    const sw = Math.max(4, Math.round(dw * k)), sh = Math.max(4, Math.round(dh * k));
+    const sw = Math.max(6, Math.round(dw * k)), sh = Math.max(6, Math.round(dh * k));
     const a = canvas(sw, sh), ac = a.getContext('2d', { willReadFrequently: true }); ac.drawImage(strip, 0, 0, sw, sh);
     const bw = sw + 2 * mx, bh = sh + 2 * my, b = canvas(bw, bh), bc = b.getContext('2d', { willReadFrequently: true });
     const ox = x0 + cx - mx / k, oy = y0 + cy - my / k;
-    for (const off of [0, -W, W]) bc.drawImage(out, ox + off, oy, bw / k, bh / k, 0, 0, bw, bh);
-    const A = ac.getImageData(0, 0, sw, sh).data, B = bc.getImageData(0, 0, bw, bh).data;
-    const LA = new Float32Array(sw * sh), LB = new Float32Array(bw * bh);
-    for (let i = 0, j = 0; i < A.length; i += 4, j++) LA[j] = A[i + 3] > 40 ? A[i] * .3 + A[i + 1] * .59 + A[i + 2] * .11 : -1;
-    for (let i = 0, j = 0; i < B.length; i += 4, j++) LB[j] = B[i + 3] > 40 ? B[i] * .3 + B[i + 1] * .59 + B[i + 2] * .11 : -1;
+    for (const off of [0, -W, W]) bc.drawImage(mosaic, ox + off, oy, bw / k, bh / k, 0, 0, bw, bh);
+    const PA = prep(ac.getImageData(0, 0, sw, sh).data, sw, sh), PB = prep(bc.getImageData(0, 0, bw, bh).data, bw, bh);
     let best = null;
     for (let dy = -my; dy <= my; dy++) for (let dx = -mx; dx <= mx; dx++) {
-      let n = 0, sa = 0, sb = 0, saa = 0, sab = 0, sbb = 0;
+      let n = 0, gab = 0, gaa = 0, gbb = 0, sa = 0, sb = 0;
       for (let y = 0; y < sh; y++) {
         const ra = y * sw, rb = (y + my + dy) * bw + mx + dx;
-        for (let x = 0; x < sw; x++) { const la = LA[ra + x]; if (la < 0) continue; const lb = LB[rb + x]; if (lb < 0) continue; n++; sa += la; sb += lb; saa += la * la; sab += la * lb; sbb += lb * lb; }
+        for (let x = 0; x < sw; x++) {
+          if (!PA.A[ra + x] || !PB.A[rb + x]) continue;
+          const ga = PA.G[ra + x], gb = PB.G[rb + x]; n++; gab += ga * gb; gaa += ga * ga; gbb += gb * gb; sa += PA.L[ra + x]; sb += PB.L[rb + x];
+        }
       }
-      if (n < sw * sh * .06 || sa < 1) continue;
-      const g = Math.min(1.25, Math.max(.8, sb / sa));
-      const e = (sbb - 2 * g * sab + g * g * saa) / n * (1 + .004 * (dx * dx + dy * dy));
-      if (!best || e < best.e) best = { e, dx, dy, g };
+      if (n < sw * sh * .05 || gaa < 1 || gbb < 1) continue;
+      const score = gab / Math.sqrt(gaa * gbb) - .0015 * (dx * dx + dy * dy);
+      if (!best || score > best.score) best = { score, dx, dy, gain: Math.min(1.3, Math.max(.77, sb / Math.max(1, sa))), n };
     }
-    return best && { dx: cx + best.dx / k, dy: cy + best.dy / k, gain: best.g };
+    return best && { dx: cx + best.dx / k, dy: cy + best.dy / k, gain: best.gain, score: best.score };
   };
-  const coarse = search(1 / 8, 0, 0, Math.round(4 / 360 * W / 8), Math.round(3 / 180 * H / 8));
-  if (!coarse) return null;
-  return search(1 / 2, coarse.dx, coarse.dy, 5, 5) || coarse;
+  const coarse = search(1 / 8, 0, 0, Math.max(2, Math.round(5 / 360 * W / 8)), Math.max(2, Math.round(4 / 180 * H / 8)));
+  if (!coarse || coarse.score < .25) return coarse && { dx: 0, dy: 0, gain: coarse.gain, score: coarse.score };   // too little detail to trust a shift
+  return search(1 / 2, coarse.dx, coarse.dy, 4, 4) || coarse;
 }
+// Measures this phone's lens from the horizon circle. Each neighbouring pair is aligned on its own;
+// with the wrong field of view every pair is off by the same small amount, so the shifts add up
+// around the circle. With the right one they add up to zero. Sensor errors cancel in the sum.
+let calibLog = [];
+function closureFor(hz, h0, fov) {
+  const W = 2048, warps = hz.map((s) => warpShot(s.small, s.R, h0, fov, W));
+  const tmp = canvas(W, W / 2), t = tmp.getContext('2d');
+  let S = 0, n = 0;
+  for (let i = 0; i < warps.length; i++) {
+    const A = warps[i], B = warps[(i + 1) % warps.length]; if (!A || !B) continue;
+    t.clearRect(0, 0, W, W / 2); for (const off of [0, -W, W]) t.drawImage(A.c, A.x0 + off, A.y0);
+    const fit = alignStrip(B.c, B.x0, B.y0, B.w, B.h, tmp);
+    if (fit && fit.score >= .25) { S += fit.dx; n++; }
+  }
+  return n >= warps.length - 1 ? S / W * 360 : null;      // degrees left open after a full turn
+}
+function measureLens(hz, h0) {
+  calibLog = [];
+  const F = [54, 58, 62, 66, 70, 74, 78, 82, 86], S = F.map((f) => closureFor(hz, h0, f));
+  F.forEach((f, i) => calibLog.push([f, S[i] == null ? null : +S[i].toFixed(2)]));
+  // where the gap crosses zero (going up); if more than one, the one nearest a typical phone lens
+  const hits = [];
+  for (let i = 0; i < F.length - 1; i++) {
+    const a = S[i], b = S[i + 1];
+    if (a != null && b != null && a < 0 && b >= 0) hits.push(F[i] + (F[i + 1] - F[i]) * a / (a - b));
+  }
+  return hits.sort((x, y) => Math.abs(x - 70) - Math.abs(y - 70))[0] ?? null;
+}
+const nextFrame = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
 let ALIGN = true;
-function takeShot(t) {
+// during capture the app only keeps the photos; they are stitched together at the end
+function takeShot(target) {
   const v = cam.video, fw = v.videoWidth, fh = v.videoHeight; if (!fw || !fh) return false;
-  const fc = cam.fc ||= canvas(fw, fh), fctx = fc.getContext('2d', { willReadFrequently: true });
-  if (fc.width !== fw) { fc.width = fw; fc.height = fh; }
+  const fc = canvas(fw, fh), fctx = fc.getContext('2d', { willReadFrequently: true });
   fctx.drawImage(v, 0, 0);
-  const shot = warpShot(fctx.getImageData(0, 0, fw, fh), cam.R, cam.h0); if (!shot) return false;
-  const W = cam.out.width;
-  const fix = ALIGN && cam.shots ? alignStrip(shot.c, shot.x0, shot.y0, shot.w, shot.h) : null;
-  const x = shot.x0 + (fix?.dx || 0), y = shot.y0 + (fix?.dy || 0);
-  cam.octx.save();
-  if (fix && Math.abs(fix.gain - 1) > .01) cam.octx.filter = `brightness(${fix.gain})`;
-  for (const off of [0, -W, W]) cam.octx.drawImage(shot.c, x + off, y);
-  cam.octx.restore();
-  cam.minY = Math.min(cam.minY, y + shot.h * .08); cam.maxY = Math.max(cam.maxY, y + shot.h * .92);
-  cam.shots++; cam.lastShot = t;
+  const R = cam.R.slice(), shot = { R, row: target.row, yaw: target.yaw, blob: null, small: null };
+  const px = fctx.getImageData(0, 0, fw, fh).data;
+  let sum = 0; for (let i = 0; i < px.length; i += 4 * 97) sum += px[i] + px[i + 1] + px[i + 2];
+  cam.dark = sum / (px.length / (4 * 97)) / 3 < 45;           // in the dark the phone must be held stiller
+  if (target.row === 0) { const sc = canvas(Math.round(fw / 2), Math.round(fh / 2)), sx = sc.getContext('2d'); sx.drawImage(fc, 0, 0, sc.width, sc.height); shot.small = sx.getImageData(0, 0, sc.width, sc.height); }
+  cam.pending.push(new Promise((ok) => fc.toBlob((b) => { shot.blob = b; ok(); }, 'image/jpeg', .93)));
+  cam.raw.push(shot); cam.shots++; cam.lastShot = performance.now();
   return true;
+}
+async function decodeFrame(blob) {
+  const bmp = await createImageBitmap(blob), c = canvas(bmp.width, bmp.height), x = c.getContext('2d', { willReadFrequently: true });
+  x.drawImage(bmp, 0, 0); bmp.close?.(); return x.getImageData(0, 0, c.width, c.height);
+}
+async function stitchAll(raw, h0) {
+  const W = PANO_W, H = W / 2, shots = raw.slice().sort((a, b) => a.row - b.row || a.yaw - b.yaw), hz = shots.filter((s) => s.row === 0);
+  if (hz.length >= 8) {
+    $('stitchText').textContent = 'Measuring your camera'; await nextFrame();
+    const fov = measureLens(hz, h0);
+    if (fov && fov > 45 && fov < 95) { LONG_FOV = Math.round(fov * 10) / 10; store.set('fov', LONG_FOV); }
+  }
+  const mosaic = canvas(W, H), m = mosaic.getContext('2d'), list = [];
+  const draw = (it) => { m.save(); if (Math.abs(it.gain - 1) > .01) m.filter = `brightness(${it.gain})`; for (const off of [0, -W, W]) m.drawImage(it.c, it.x + off, it.y); m.restore(); };
+  for (let i = 0; i < shots.length; i++) {
+    $('stitchText').textContent = `Stitching ${i + 1}/${shots.length}`; await nextFrame();
+    const s = shots[i], w = warpShot(await decodeFrame(s.blob), s.R, h0, LONG_FOV, W); if (!w) continue;
+    const fix = ALIGN && list.length ? alignStrip(w.c, w.x0, w.y0, w.w, w.h, mosaic) : null;
+    const dx = fix?.dx || 0, dy = fix?.dy || 0;
+    const it = { c: w.c, x: w.x0 + dx, y: w.y0 + dy, gain: fix?.gain || 1, lon: w.lon + dx / W * 360, lat: w.lat - dy / H * 180, row: s.row };
+    list.push(it); draw(it);
+    // after the last horizon photo: close the circle, spreading what is left over evenly
+    if (s.row === 0 && i === hz.length - 1 && hz.length >= 6 && ALIGN) {
+      const first = list[0], tmp = canvas(W, H), t = tmp.getContext('2d');
+      for (const off of [0, -W, W]) t.drawImage(first.c, first.x + off, first.y);
+      const close = alignStrip(it.c, it.x, it.y, it.c.width, it.c.height, tmp);
+      if (close && close.score >= .25) {
+        list.forEach((x, k) => { const f = k / (hz.length - 1); x.x += close.dx * f; x.y += close.dy * f; x.lon += close.dx * f / W * 360; x.lat -= close.dy * f / H * 180; });
+        m.clearRect(0, 0, W, H); list.forEach(draw);
+      }
+    }
+  }
+  let minY = H, maxY = 0; list.forEach((x) => { minY = Math.min(minY, x.y + x.c.height * .06); maxY = Math.max(maxY, x.y + x.c.height * .94); });
+  return { mosaic, list, minY, maxY };
+}
+// Final picture: every spot comes from the one photo whose centre is closest to it, with a narrow
+// soft seam between neighbours. Wide cross-fades are what make double images, so they are avoided.
+function composeSeams(base, list) {
+  const W = base.width, H = base.height, BAND = 1.6 * DEG;
+  const vec = (lon, lat) => { const a = lon * DEG, b = lat * DEG; return [Math.cos(b) * Math.sin(a), Math.cos(b) * Math.cos(a), Math.sin(b)]; };
+  const C = list.map((s) => vec(s.lon, s.lat));
+  const top = canvas(W, H), tctx = top.getContext('2d');
+  tctx.globalCompositeOperation = 'lighter';
+  list.forEach((s, i) => {
+    const nb = C.map((c, j) => j).filter((j) => j !== i && C[i][0] * C[j][0] + C[i][1] * C[j][1] + C[i][2] * C[j][2] > Math.cos(100 * DEG));
+    const w = s.c.width, h = s.c.height, cx = s.c.getContext('2d', { willReadFrequently: true }), img = cx.getImageData(0, 0, w, h), d = img.data;
+    const sinL = new Float32Array(w), cosL = new Float32Array(w);
+    for (let x = 0; x < w; x++) { const lon = ((s.x + x + .5) / W - .75) * 2 * Math.PI; sinL[x] = Math.sin(lon); cosL[x] = Math.cos(lon); }
+    for (let y = 0; y < h; y++) {
+      const lat = (.5 - (s.y + y + .5) / H) * Math.PI, cb = Math.cos(lat), sb = Math.sin(lat);
+      for (let x = 0; x < w; x++) {
+        const o = (y * w + x) * 4 + 3; if (!d[o]) continue;
+        const vx = cb * sinL[x], vy = cb * cosL[x], vz = sb;
+        const self = Math.acos(Math.min(1, vx * C[i][0] + vy * C[i][1] + vz * C[i][2]));
+        let other = Math.PI;
+        for (const j of nb) { const a = Math.acos(Math.min(1, vx * C[j][0] + vy * C[j][1] + vz * C[j][2])); if (a < other) other = a; }
+        const own = Math.min(1, Math.max(0, .5 + (other - self) / (2 * BAND)));
+        d[o] = d[o] * own;
+      }
+    }
+    const m = canvas(w, h); m.getContext('2d').putImageData(img, 0, 0);
+    tctx.save(); if (Math.abs(s.gain - 1) > .01) tctx.filter = `brightness(${s.gain})`;
+    for (const off of [0, -W, W]) tctx.drawImage(m, s.x + off, s.y);
+    tctx.restore();
+  });
+  // the cross-faded picture stays underneath, only where no single photo covers a spot
+  const out = canvas(W, H), o = out.getContext('2d');
+  o.drawImage(base, 0, 0); o.globalCompositeOperation = 'destination-out'; o.drawImage(top, 0, 0); o.globalCompositeOperation = 'source-over';
+  o.drawImage(top, 0, 0);
+  return out;
 }
 const inPlay = (tg) => cam.full || tg.row === 0;
 const rowDone = (ri) => cam.targets.filter((x) => x.row === ri).every((x) => x.done);
@@ -1971,7 +2073,7 @@ function runViewfinder() {
       ctx.drawImage(v, ox, oy, vw * k, vh * k);
       if (cam.started && cam.R && !cam.paused) {
         const f = (Math.max(vw, vh) / 2) / Math.tan(LONG_FOV / 2 * DEG), fwd = mul(cam.R, [0, 0, -1]);
-        const row = activeRow(), still = !(cam.spin > 22);
+        const row = activeRow(), still = !(cam.spin > (cam.dark ? 7 : 12));
         let aimed = null, best = -2, near = null, nearDot = -2;
         for (const tg of cam.targets) {
           if (tg.done || !inPlay(tg)) continue;
@@ -1982,6 +2084,7 @@ function runViewfinder() {
           const sx = ox + (vw / 2 + f * d[0] / -d[2]) * k, sy = oy + (vh / 2 - f * d[1] / -d[2]) * k;
           if (sx < -40 || sy < -40 || sx > cv.width + 40 || sy > cv.height + 40) continue;
           const on = tg.row === row, r = (on ? 15 : 8) * DPR;
+          if (!on) continue;
           ctx.beginPath(); ctx.arc(sx, sy, r, 0, 7);
           ctx.fillStyle = on ? 'rgba(255,255,255,.95)' : 'rgba(255,255,255,.35)'; ctx.shadowColor = '#2ef2cf'; ctx.shadowBlur = on ? 18 : 0; ctx.fill(); ctx.shadowBlur = 0;
         }
@@ -1990,13 +2093,13 @@ function runViewfinder() {
           // any dot you are pointing at gets captured, in whatever order; the hints follow the current row
           const nearAng = Math.acos(Math.min(1, nearDot)) / DEG;
           if (nearAng < 3.5 && still) { cam.still += 1; } else cam.still = 0;
-          if (cam.still >= 4 && t - cam.lastShot > 350) {
-            if (takeShot(t)) { near.done = true; haptic('medium'); paintRows(); if (afterShot()) { if (!cam) return; } }
+          if (cam.still >= (cam.dark ? 14 : 8) && performance.now() - cam.lastShot > 400) {
+            if (takeShot(near)) { near.done = true; haptic('medium'); paintRows(); if (afterShot()) { if (!cam) return; } }
             cam.still = 0;
           }
           const ang = Math.min(Math.acos(Math.min(1, best)) / DEG, nearAng);
           const hp = headingOf(cam.R), want = angDiff(cam.h0 + aimed.yaw, hp.heading), wantP = aimed.pitch - hp.pitch;
-          $('vfText').textContent = ang < 3.2 ? (still ? 'Hold still…' : 'Slow down, hold still') : Math.abs(wantP) > 12 && Math.abs(want) < 25 ? (wantP > 0 ? 'Tilt up to the dot ↑' : 'Tilt down to the dot ↓') : want > 0 ? 'Turn right to the next dot →' : '← Turn left to the next dot';
+          $('vfText').textContent = ang < 3.2 ? (still ? (cam.dark ? 'It is dark: hold very still…' : 'Hold still…') : 'Slow down, hold still') : Math.abs(wantP) > 12 && Math.abs(want) < 25 ? (wantP > 0 ? 'Tilt up to the dot ↑' : 'Tilt down to the dot ↓') : want > 0 ? 'Turn right to the next dot →' : '← Turn left to the next dot';
           $('vfSub').textContent = ROWS[row].name === 'Horizon' ? 'Turn the phone around itself, not around you' : row === 1 ? 'Now the sky: aim up at the dots' : row === 2 ? 'Now the ground: aim down at the dots' : 'Last one: straight up';
         }
       }
@@ -2032,23 +2135,31 @@ function fillGaps(c, top, bot) {
 async function blurFaces(c) {
   if (!('FaceDetector' in window)) return -1;
   try {
-    const det = new window.FaceDetector({ fastMode: true, maxDetectedFaces: 20 }), faces = await det.detect(c), x = c.getContext('2d');
-    for (const f of faces) { const b = f.boundingBox, pad = b.width * .25; x.save(); x.filter = 'blur(18px)'; x.drawImage(c, b.x - pad, b.y - pad, b.width + pad * 2, b.height + pad * 2, b.x - pad, b.y - pad, b.width + pad * 2, b.height + pad * 2); x.restore(); }
+    const det = new window.FaceDetector({ fastMode: false, maxDetectedFaces: 20 }), all = await det.detect(c), x = c.getContext('2d');
+    const faces = all.filter((f) => { const b = f.boundingBox, eyes = (f.landmarks || []).filter((l) => l.type === 'eye').length; return eyes >= 2 && b.width > 14 && b.width < c.width * .2; });
+    for (const f of faces) {
+      const b = f.boundingBox, pad = b.width * .2, rx = b.x - pad, ry = b.y - pad, rw = b.width + pad * 2, rh = b.height + pad * 2;
+      x.save(); x.beginPath(); x.ellipse(rx + rw / 2, ry + rh / 2, rw / 2, rh / 2, 0, 0, 7); x.clip();
+      x.filter = `blur(${Math.max(6, b.width / 6)}px)`; x.drawImage(c, rx - 40, ry - 40, rw + 80, rh + 80, rx - 40, ry - 40, rw + 80, rh + 80); x.restore();
+    }
     return faces.length;
   } catch { return -1; }
 }
 async function finishCapture() {
-  const out = cam.out, top = cam.minY, bot = cam.maxY; stopCamera(); cancelAnimationFrame(capRAF); keepAwake(false);
+  const c = cam; stopCamera(); cancelAnimationFrame(capRAF); keepAwake(false);
   step('stitch'); $('stitchText').textContent = 'Stitching';
-  await new Promise((r) => setTimeout(r, 60));
-  const full = fillGaps(out, top, bot);
-  $('stitchText').textContent = 'Filling the sky and the ground';
+  await Promise.all(c.pending);
+  const { mosaic, list, minY, maxY } = await stitchAll(c.raw, c.h0);
+  $('stitchText').textContent = 'Blending the seams'; await nextFrame();
+  const seams = list.length > 1 ? composeSeams(mosaic, list) : mosaic;
+  $('stitchText').textContent = 'Filling the sky and the ground'; await nextFrame();
+  const full = fillGaps(seams, minY, maxY);
   let faces = -1;
   if ($('fBlur').checked) { $('stitchText').textContent = 'Looking for faces to blur'; faces = await blurFaces(full); }
   draft = { canvas: full };
   $('stitchText').textContent = faces > 0 ? `Blurred ${faces} ${faces === 1 ? 'face' : 'faces'}` : faces === 0 ? 'No faces found' : 'Opening the portal';
   haptic('heavy');
-  setTimeout(() => { step('details'); $('fName').value = ''; $('fPlace').value = ''; runPeek($('peek2'), { canvas: full }); }, 700);
+  setTimeout(() => { step('details'); $('fName').value = ''; $('fPlace').value = ''; runPeek($('peek2'), { canvas: full }); }, 600);
 }
 
 /* your own photo becomes the place: a real 360 is used as is, a panorama or normal photo is wrapped around you */
@@ -2356,6 +2467,9 @@ const HE = {
   "✓ Finish": "✓ לסיים",
   "The horizon is enough": "האופק מספיק",
   "About 20 seconds. After it you choose whether to add the sky and the ground.": "בערך 20 שניות. אחר כך בוחרים אם להוסיף שמיים וקרקע.",
+  "Measuring your camera": "מודדים את המצלמה שלך",
+  "Blending the seams": "מחליקים את התפרים",
+  "It is dark: hold very still…": "חשוך: להחזיק ממש יציב…",
   "visit": "ביקור",
   "visits": "ביקורים",
   "story": "סטורי",
@@ -2451,7 +2565,7 @@ const HE = {
 };
 const HE_RX = [
   [/^(\d+) portals?$/, '$1 פורטלים'], [/^Horizon (\d+)\/(\d+)$/, 'אופק $1/$2'], [/^Sky (\d+)\/(\d+)$/, 'שמיים $1/$2'], [/^Ground (\d+)\/(\d+)$/, 'קרקע $1/$2'], [/^Top (\d+)\/(\d+)$/, 'למעלה $1/$2'],
-  [/^Blurred (\d+) faces?$/, 'טושטשו $1 פנים'], [/^Tap the spot for (.+)$/, (m, w) => `לבחור נקודה ל${w === 'your comment' ? 'תגובה שלך' : w === 'your story' ? 'סטורי שלך' : w}`],
+  [/^Blurred (\d+) faces?$/, 'טושטשו $1 פנים'], [/^Stitching (\d+)\/(\d+)$/, 'מחברים $1/$2'], [/^Tap the spot for (.+)$/, (m, w) => `לבחור נקודה ל${w === 'your comment' ? 'תגובה שלך' : w === 'your story' ? 'סטורי שלך' : w}`],
   [/^Welcome, (.+) ✨$/, 'ברוכים הבאים, $1 ✨'], [/^You stepped through to (.+)$/, 'עברת ל$1'], [/^Delete “(.+)”\?$/, 'למחוק את “$1”?'],
   [/^(\d+) comments?$/, '$1 תגובות'], [/^(\d+) stor(y|ies)$/, '$1 סטוריז'], [/^(\d+) visits?$/, '$1 ביקורים'],
 ];
@@ -2509,7 +2623,7 @@ document.addEventListener('visibilitychange', () => { if (document.hidden && cam
     if (!prof?.name) showOnboard(1);
   }, 1200);
 })();
-window.__portals = { get portals() { return portals; }, get reels() { return reels; }, get cam() { return cam; }, takeShot: (t) => takeShot(t), set align(v) { ALIGN = v; }, onBack, share360, withGPano };
+window.__portals = { get calib() { return calibLog; },  get portals() { return portals; }, get reels() { return reels; }, get cam() { return cam; }, takeShot: (t) => takeShot(t), set align(v) { ALIGN = v; }, onBack, share360, withGPano };
 </script>
 </body>
 </html>
