@@ -2305,6 +2305,7 @@ function matchPair(A, B, Ra, Rb, fov) {
     if (bj >= 0 && best < 64 && best < second * .8) bestA[i] = bj;
   }
   for (let i = 0; i < A.n; i++) if (bestA[i] >= 0 && bestB[bestA[i]] === i) cand.push([i, bestA[i]]);   // both ways
+  if (window.__mpLog) window.__mpLog.push(['c', A.n, B.n, cand.length]);
   if (cand.length < 8) return [];
   const thr = Math.cos(2 * DEG); let bestQ = null, bestN = 0;          // 2 degrees: room for the hand moving a little
   for (let it = 0; it < 600; it++) {
@@ -2314,6 +2315,7 @@ function matchPair(A, B, Ra, Rb, fov) {
     let n = 0; for (const [i, j] of cand) if (dot3(mat3v(Q, WA[i]), WB[j]) > thr) n++;
     if (n > bestN) { bestN = n; bestQ = Q; }
   }
+  if (window.__mpLog) window.__mpLog.push(['r', bestN]);
   if (!bestQ || bestN < 8) return [];
   // guided pass: with the rotation known, look again for every point exactly where it should be
   const g2 = Math.cos(1.5 * DEG), out = [], usedB = new Uint8Array(B.n);
@@ -2392,6 +2394,69 @@ function denseFields(lows, Ws, h0) {
   return S;
 }
 const wrapW = (v, W) => ((v % W) + W * 1.5) % W - W / 2;
+// Photos whose corners found no partner (a night sky, a plain ceiling, a dark corner) are placed by
+// comparing the pictures themselves: small patches of the photo are searched for in the neighbours that are
+// already placed (normalised cross-correlation on small sphere images, which averages away noise), and the
+// rotation that best moves the photo onto those spots is applied. Done twice, the second time finer.
+function directAlign(shots, Rs, h0, placed) {
+  const done = new Set(placed), out = Rs.slice(), report = [], placedOk = new Set();
+  const fwd = (R) => mat3v(R, [0, 0, -1]), skew = (a) => [0, -a[2], a[1], a[2], 0, -a[0], -a[1], a[0], 0];
+  const todo = shots.map((s, i) => i).filter((i) => !done.has(i));
+  for (const pass of [{ Ws: 512, SR: 24, R: 5, step: 6 }, { Ws: 1024, SR: 10, R: 7, step: 10 }]) {
+    const { Ws, SR, R, step } = pass, Hs = Ws / 2, mod = (v) => ((v % Ws) + Ws) % Ws;
+    const lowOf = (i) => { const w = warpShot(shots[i].small, out[i], h0, LONG_FOV, Ws, LENS_K1); if (!w) return null; const d = w.c.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w.w, w.h).data; free(w.c);
+      const l = new Float32Array(w.w * w.h), ok = new Uint8Array(w.w * w.h); for (let k = 0; k < l.length; k++) { l[k] = d[k * 4] * .3 + d[k * 4 + 1] * .59 + d[k * 4 + 2] * .11; ok[k] = d[k * 4 + 3] > 220; } return { ...w, l, ok }; };
+    const idx = (A, X, Y) => { if (Y < A.y0 || Y >= A.y0 + A.h) return -1; const dx = mod(X - A.x0); return dx < A.w ? (Y - A.y0) * A.w + dx : -1; };
+    const vec = (X, Y) => { const hd = (h0 + ((X + .5) / Ws - .75) * 360) * DEG, lat = (.5 - (Y + .5) / Hs) * Math.PI; return [Math.cos(lat) * Math.sin(hd), Math.cos(lat) * Math.cos(hd), Math.sin(lat)]; };
+    const cache = new Map(), get = (i) => (cache.has(i) ? cache.get(i) : (cache.set(i, lowOf(i)), cache.get(i)));
+    for (const u of todo) {
+      const U = lowOf(u); if (!U) continue;
+      const nbs = [...done].filter((j) => j !== u && dot3(fwd(out[u]), fwd(out[j])) > Math.cos(80 * DEG));
+      const A = [], B = [], pa = new Float32Array((2 * R + 1) ** 2);
+      for (const j of nbs) {
+        const N = get(j); if (!N) continue;
+        for (let Y = Math.max(U.y0, Math.round(Hs * .1)) + R; Y < Math.min(U.y0 + U.h, Math.round(Hs * .9)) - R; Y += step) for (let u0 = R; u0 < Math.min(U.w, Ws) - R; u0 += step) {
+          const X = U.x0 + u0; let ok = true, m = 0, n = 0;
+          for (let dy = -R; dy <= R && ok; dy++) for (let dx = -R; dx <= R; dx++) { const k = idx(U, X + dx, Y + dy); if (k < 0 || !U.ok[k]) { ok = false; break; } pa[n++] = U.l[k]; m += U.l[k]; }
+          if (!ok) continue;
+          m /= n; let va = 0; for (let k = 0; k < n; k++) { pa[k] -= m; va += pa[k] * pa[k]; } if (va / n < 30) continue;
+          if (idx(N, X, Y) < 0) continue;
+          const ncc = (sx, sy, sub) => { let s1 = 0, s2 = 0, sab = 0, c = 0;
+            for (let dy = -R; dy <= R; dy += sub) for (let dx = -R; dx <= R; dx += sub) { const k = idx(N, X + dx + sx, Y + dy + sy); if (k < 0 || !N.ok[k]) return -1; const b = N.l[k]; s1 += b; s2 += b * b; sab += pa[(dy + R) * (2 * R + 1) + dx + R] * b; c++; }
+            const mb = s1 / c, vb = s2 / c - mb * mb; return vb < 4 ? -1 : (sab / c) / Math.sqrt(vb * (va / n)); };
+          let best = -1, bx = 0, by = 0; const all = [];
+          for (let sy = -SR; sy <= SR; sy += 2) for (let sx = -SR; sx <= SR; sx += 2) { const c = ncc(sx, sy, 2); all.push(c, sx, sy); if (c > best) { best = c; bx = sx; by = sy; } }
+          if (best < .6) continue;
+          let second = -1; for (let k = 0; k < all.length; k += 3) if ((Math.abs(all[k + 1] - bx) > 4 || Math.abs(all[k + 2] - by) > 4) && all[k] > second) second = all[k];
+          if (best - second < .1) continue;
+          const cx = bx, cy = by; best = -1; for (let sy = cy - 2; sy <= cy + 2; sy++) for (let sx = cx - 2; sx <= cx + 2; sx++) { const c = ncc(sx, sy, 1); if (c > best) { best = c; bx = sx; by = sy; } }
+          if (best < .75) continue;
+          A.push(vec(X, Y)); B.push(vec(X + bx, Y + by));
+        }
+      }
+      // the rotation that moves A onto B (small-angle least squares, repeated), dropping points that disagree
+      let Rc = [1, 0, 0, 0, 1, 0, 0, 0, 1], keep = A.map(() => true);
+      for (let it = 0; it < 6 && A.length >= 12; it++) {
+        const M = [0, 0, 0, 0, 0, 0, 0, 0, 0], g = [0, 0, 0]; let cnt = 0;
+        A.forEach((a0, k) => { if (!keep[k]) return; const a = mat3v(Rc, a0), r = [B[k][0] - a[0], B[k][1] - a[1], B[k][2] - a[2]], S = skew(a);
+          for (let p = 0; p < 3; p++) { for (let q = 0; q < 3; q++) M[p * 3 + q] += S[0 * 3 + p] * S[0 * 3 + q] + S[1 * 3 + p] * S[1 * 3 + q] + S[2 * 3 + p] * S[2 * 3 + q];
+            g[p] -= S[0 * 3 + p] * r[0] + S[1 * 3 + p] * r[1] + S[2 * 3 + p] * r[2]; } cnt++; });
+        if (cnt < 12) break;
+        const w = solveLinear([[M[0], M[1], M[2]], [M[3], M[4], M[5]], [M[6], M[7], M[8]]], g); if (!w) break;
+        Rc = mat3m(expRot(w), Rc);
+        const res = A.map((a0, k) => Math.acos(Math.min(1, dot3(mat3v(Rc, a0), B[k]))) / DEG), med = res.slice().sort((x, y) => x - y)[res.length >> 1];
+        keep = res.map((r) => r < Math.max(1, med * 2.5));
+      }
+      const used = keep.filter(Boolean).length, ang = Math.acos(Math.min(1, (Rc[0] + Rc[4] + Rc[8] - 1) / 2)) / DEG;
+      if (used >= 12 && ang < 25) { out[u] = mat3m(Rc, out[u]); cache.delete(u); }
+      // trusted only when the finer second look agrees (needs just a small touch); a big jump there means
+      // the patches did not really agree (a lamp, repeating fence boards), so its place stays uncertain
+      if (Ws === 1024) { if (used >= 12 && ang < 2) placedOk.add(u); else if (ang >= 2) out[u] = Rs[u]; }
+      report.push([u, A.length, used, +ang.toFixed(2)]);
+    }
+  }
+  return { Rs: out, report, placedOk };
+}
 function solveLinear(H, g) {   // Gaussian elimination with partial pivoting; H is n x n (array of rows), solves H x = g
   const n = g.length, M = H.map((r, i) => [...r, g[i]]);
   for (let c = 0; c < n; c++) {
@@ -2528,7 +2593,7 @@ function findSeams(lows, pairsIdx, Ws) {
 // nearest photo centre, then every pair of neighbouring photos (side by side or one above the other)
 // gets a cut that runs where the two photos agree and around object outlines, the same way as along
 // the horizon. A single owner map means no spot is shown twice and no spot is left out.
-function buildLabels(lows, Ws, rows = []) {
+function buildLabels(lows, Ws, rows = [], trust = null) {
   const Hs = Ws / 2, N = lows.length, L = new Int16Array(Ws * Hs).fill(-1), best = new Float32Array(Ws * Hs).fill(-9);
   const mod = (v) => ((v % Ws) + Ws) % Ws, wrapd = (v) => mod(v + Ws / 2) - Ws / 2;
   const vec = (lon, lat) => { const a = lon * DEG, b = lat * DEG; return [Math.cos(b) * Math.sin(a), Math.cos(b) * Math.cos(a), Math.sin(b)]; };
@@ -2542,7 +2607,7 @@ function buildLabels(lows, Ws, rows = []) {
     if (!A) return;
     for (let y = Math.max(0, A.y0); y < Math.min(Hs, A.y0 + A.h); y++) for (let dx = 0; dx < Math.min(A.w, Ws); dx++) {
       const x = mod(A.x0 + dx), a = A.d[((y - A.y0) * A.w + dx) * 4 + 3]; if (a <= 30) continue;
-      const k = y * Ws + x, sc = cosY[y] * sinX[x] * C[i][0] + cosY[y] * cosX[x] * C[i][1] + sinY[y] * C[i][2] + (a > 200 ? 0 : -3) + (rows[i] === 0 ? 1 : 0);
+      const k = y * Ws + x, sc = cosY[y] * sinX[x] * C[i][0] + cosY[y] * cosX[x] * C[i][1] + sinY[y] * C[i][2] + (a > 200 ? 0 : -3) + (rows[i] === 0 ? 1 : 0) + (trust && !trust[i] ? -.6 : 0);   // photos whose place could not be checked: only where nothing else is
       if (sc > best[k]) { best[k] = sc; L[k] = i; }
     }
   });
@@ -2551,18 +2616,22 @@ function buildLabels(lows, Ws, rows = []) {
   // spot it covers well; photos up and down only fill beyond it. The cut between them then lies at the
   // edge of the middle photos, which is usually plain ceiling or floor, where a small misalignment cannot
   // be seen. Only photos within the same row (or the top shot) get the searched cuts between them.
-  for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++) if (C[i] && C[j] && (rows[i] === 0) === (rows[j] === 0)) { const c = C[i][0] * C[j][0] + C[i][1] * C[j][1] + C[i][2] * C[j][2]; if (c > Math.cos(75 * DEG)) pairs.push([i, j, c]); }
+  for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++) if (C[i] && C[j] && (!trust || trust[i] === trust[j] || (rows[i] === 0) !== (rows[j] === 0))) { const c = C[i][0] * C[j][0] + C[i][1] * C[j][1] + C[i][2] * C[j][2]; if (c > Math.cos(75 * DEG)) pairs.push([i, j, c]); }
   pairs.sort((p, q) => q[2] - p[2]);
   const lumA = (A, o) => (A.d[o] * .3 + A.d[o + 1] * .59 + A.d[o + 2] * .11) * A.gain;
   for (const [i, j] of pairs) {
     const A = lows[i], B = lows[j], box = A.w <= B.w ? A : B;              // walk the narrower photo's box
     const y0 = Math.max(0, A.y0, B.y0), y1 = Math.min(Hs, A.y0 + A.h, B.y0 + B.h); if (y1 - y0 < 4) continue;
     const bx0 = box.x0, bw = Math.min(box.w, Ws), hh = y1 - y0, n = bw * hh;
+    const cross = (rows[i] === 0) !== (rows[j] === 0);
     const inR = new Uint8Array(n), la = new Float32Array(n), lb = new Float32Array(n), col = new Float32Array(n); let cnt = 0;
     for (let y = 0; y < hh; y++) for (let u = 0; u < bw; u++) {
       const x = mod(bx0 + u), oa = at(A, x, y0 + y), ob = at(B, x, y0 + y), q = y * bw + u; if (oa < 0 || ob < 0) continue;
       la[q] = lumA(A, oa); lb[q] = lumA(B, ob);
       const own = L[(y0 + y) * Ws + x];
+      // between the middle row and a row above / below, the cut may only move within the outer part of the
+      // middle photo (a band of ~35% of its height at the edge facing the other photo)
+      if (cross) { const H0 = rows[i] === 0 ? A : B, band = H0.h * .35, yy = y0 + y; if (H0 === A ? (B.lat > A.lat ? yy > H0.y0 + band : yy < H0.y0 + H0.h - band) : (A.lat > B.lat ? yy > H0.y0 + band : yy < H0.y0 + H0.h - band)) continue; }
       if (A.d[oa + 3] > 200 && B.d[ob + 3] > 200 && (own === i || own === j)) {
         inR[q] = 1; cnt++; let c = 0; for (let k = 0; k < 3; k++) c += Math.abs(A.d[oa + k] * A.gain - B.d[ob + k] * B.gain); col[q] = c / 3;
       }
@@ -2616,7 +2685,7 @@ async function stitchAll(rawAll, h0) {
     } else LONG_FOV = known;
   }
   // ---- feature engine: match points between photos and solve every rotation and the lens together ----
-  let Rs = shots.map((s) => s.R), gains = shots.map(() => 1), engine = false, pairs = [], fields = shots.map(() => null);
+  let Rs = shots.map((s) => s.R), gains = shots.map(() => 1), engine = false, pairs = [], fields = shots.map(() => null), trusted = null;
   if (window.jsfeat && !window.__noEngine && shots.length >= 2) {
     $('stitchText').textContent = 'Finding matching points'; await nextFrame();
     const F = shots.map((s) => s.F || extractFeatures(s.small));
@@ -2637,6 +2706,7 @@ async function stitchAll(rawAll, h0) {
         if (only && !(only(a) && only(b))) continue;
         const Ra = shots[a].Rc || shots[a].R, Rb = shots[b].Rc || shots[b].R;
         if (dot3(fwdOf(Ra), fwdOf(Rb)) < Math.cos(Math.min(LONG_FOV > 90 ? 95 : 70, LONG_FOV * .95) * DEG)) continue;
+        if (window.__mpLog) window.__mpLog.push(['p', a, b]);
         const m = matchPair(F[a], F[b], Ra, Rb, LONG_FOV);
         if (m.length) out.push({ a, b, m, Q: m.Q });
         if ((a * shots.length + b) % 6 === 0) await nextFrame();
@@ -2644,10 +2714,18 @@ async function stitchAll(rawAll, h0) {
       return out;
     };
     pairs.push(...(await matchAll()));
-    // connected photos: the engine is used only if almost every photo found its neighbours
-    const linked = new Set(pairs.flatMap((p) => [p.a, p.b]));
+    // The photos that are connected to each other through matches (the largest such group) are lined up
+    // precisely; the rest (a black night sky, a plain ceiling: nothing to match) follow their nearest
+    // matched neighbour. Real captures often have several such photos, so this must not switch the
+    // precise alignment off for everything (it used to need 80% of the photos matched).
+    const par = shots.map((_, i) => i), find = (i) => (par[i] === i ? i : (par[i] = find(par[i])));
+    pairs.forEach((p) => { par[find(p.a)] = find(p.b); });
+    const groups = new Map(); pairs.forEach((p) => { for (const i of [p.a, p.b]) { const r = find(i); if (!groups.has(r)) groups.set(r, new Set()); groups.get(r).add(i); } });
+    const linked = [...groups.values()].sort((x, y) => y.size - x.size)[0] || new Set();
+    pairs.splice(0, pairs.length, ...pairs.filter((p) => linked.has(p.a) && linked.has(p.b)));
+    const hzN = shots.filter((s) => s.row === 0).length, hzIn = shots.filter((s, i) => s.row === 0 && linked.has(i)).length;
     window.__engine = { pairs: pairs.map((p) => [p.a, p.b, p.m.length]), linked: linked.size, n: shots.length };
-    if (linked.size >= Math.max(2, Math.ceil(shots.length * .8)) && pairs.length >= shots.length - 1) {
+    if (linked.size >= Math.max(3, Math.ceil(shots.length * .5)) && hzIn >= Math.ceil(hzN * .7)) {
       $('stitchText').textContent = 'Lining up every photo'; await nextFrame();
       // starting point from the photos themselves: chain the rotations found between matched photos,
       // strongest links first (a spanning tree), so a wrong compass reading does not matter
@@ -2658,7 +2736,20 @@ async function stitchAll(rawAll, h0) {
       const closed = hzI.length >= 6 && hzI.every((x, k) => has(x, hzI[(k + 1) % hzI.length]));
       const known = store.get(lensKey('fovOk'), false) && store.get(lensKey('fov'), 0);
       if (!closed && known) LONG_FOV = known;
-      const ba = bundleAdjust(F, start, pairs, LONG_FOV, !closed, LENS_K1);
+      let ba = bundleAdjust(F, start, pairs, LONG_FOV, !closed, LENS_K1);
+      // a pair of photos matched by mistake (repeating patterns: fence boards, tiles) pulls a photo off;
+      // such a pair disagrees with everything else after the first solve, so it is dropped and the solve repeated
+      const pairErr = (pr) => { const A = F[pr.a], B = F[pr.b], fa = focalOf(A.w, A.h, ba.fov), fb = focalOf(B.w, B.h, ba.fov);
+        const e = pr.m.map(([i, j]) => Math.acos(Math.min(1, dot3(norm3(mat3v(ba.Rs[pr.a], rayOf(A.pts[i * 2], A.pts[i * 2 + 1], A.w, A.h, fa, ba.k1))), norm3(mat3v(ba.Rs[pr.b], rayOf(B.pts[j * 2], B.pts[j * 2 + 1], B.w, B.h, fb, ba.k1)))))) / DEG).sort((x, y) => x - y);
+        return e[e.length >> 1]; };
+      const errs = pairs.map(pairErr), medAll = errs.slice().sort((x, y) => x - y)[errs.length >> 1] || 0;
+      const bad = pairs.filter((pr, k) => errs[k] > Math.max(1.5, medAll * 4));
+      window.__engine.dropped = bad.map((pr) => [pr.a, pr.b, +errs[pairs.indexOf(pr)].toFixed(2)]);
+      if (bad.length && bad.length < pairs.length / 4) {
+        pairs.splice(0, pairs.length, ...pairs.filter((pr) => !bad.includes(pr)));
+        ba = bundleAdjust(F, start, pairs, LONG_FOV, !closed, LENS_K1);
+      }
+
       // level the horizon by gravity (the accelerometer is reliable even where the compass is not)
       let up = [0, 0, 0]; shots.forEach((s, i) => { const u = mat3v(ba.Rs[i], [s.R[6], s.R[7], s.R[8]]); up[0] += u[0]; up[1] += u[1]; up[2] += u[2]; });
       up = norm3(up); const ax = cross3(up, [0, 0, 1]), sn = Math.hypot(...ax);
@@ -2677,6 +2768,11 @@ async function stitchAll(rawAll, h0) {
         });
         Rs = ba.Rs; LONG_FOV = Math.round(ba.fov * 100) / 100; if (closed) LENS_K1 = Math.round(ba.k1 * 1e4) / 1e4; engine = true;
         gains = solveGains(F, pairs);
+        if (linked.size < shots.length) {
+          $('stitchText').textContent = 'Placing the photos with few details'; await nextFrame();
+          const da = directAlign(shots, Rs, h0, linked); Rs = da.Rs; window.__engine.direct = da.report;
+          trusted = new Set([...linked, ...da.placedOk]);
+        }
         if (closed) { store.set(lensKey('fov'), LONG_FOV); store.set(lensKey('fovOk'), true); store.set(lensKey('k1'), LENS_K1); }
 
       }
@@ -2719,7 +2815,7 @@ async function stitchAll(rawAll, h0) {
     if (hzIdx.length >= 3) for (let k = 0; k < hzIdx.length; k++) nb.push([hzIdx[k], hzIdx[(k + 1) % hzIdx.length]]);
     else if (hzIdx.length === 2) nb.push([hzIdx[0], hzIdx[1]]);
     seams = { map: findSeams(lows, nb, Ws), scale: W / Ws, nb };
-    if (shots.some((s) => s.row !== 0)) { seams.labels = buildLabels(lows, Ws, shots.map((s) => s.row)); seams.Ws = Ws; }
+    if (shots.some((s) => s.row !== 0)) { seams.labels = buildLabels(lows, Ws, shots.map((s) => s.row), trusted ? shots.map((s, i) => trusted.has(i)) : null); seams.Ws = Ws; }
   }
   let minY = H, maxY = 0; list.forEach((x) => { minY = Math.min(minY, x.y + x.c.height * .06); maxY = Math.max(maxY, x.y + x.c.height * .94); });
   window.__engine = { ...(window.__engine || {}), used: engine, fov: LONG_FOV, k1: LENS_K1, shots: shots.length, gains: gains.map((g) => +g.toFixed(3)) };
