@@ -247,7 +247,7 @@ button.mark{text-align:left}
 .player .track i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--teal),var(--violet))}
 .player.playing .track i{animation:prog 30s linear forwards}
 
-.toast{position:fixed;z-index:60;left:50%;top:calc(86px + var(--sat));translate:-50% 0;padding:11px 18px;border-radius:999px;font-size:.92rem;font-weight:500;white-space:nowrap;max-width:92vw;overflow:hidden;text-overflow:ellipsis;animation:drop .4s cubic-bezier(.3,1.4,.4,1)}
+.toast{position:fixed;z-index:60;left:50%;top:calc(86px + var(--sat));translate:-50% 0;padding:11px 18px;border-radius:22px;font-size:.92rem;font-weight:500;width:max-content;max-width:92vw;text-align:center;overflow-wrap:anywhere;animation:drop .4s cubic-bezier(.3,1.4,.4,1)}
 
 /* ================= CREATE ================= */
 #create{position:fixed;inset:0;z-index:40;background:#04050b;display:none}
@@ -679,7 +679,7 @@ button.mark{text-align:left}
 .vf-target{width:96px;height:96px}
 .photo-pick{display:flex;align-items:center;gap:10px;justify-content:center;cursor:pointer}.photo-pick img{width:44px;height:44px;border-radius:10px;object-fit:cover}
 .splash-icon{width:180px;height:180px;animation:splashIn .9s cubic-bezier(.2,1.4,.4,1),bob 4s ease-in-out infinite;filter:drop-shadow(0 0 30px rgba(139,92,246,.45))}
-#create.show ~ #toastHost .toast{top:auto;bottom:calc(150px + var(--sab))}
+#create.show ~ #toastHost .toast{top:calc(14px + var(--sat))}
 .x{margin-inline-start:.06em;background:linear-gradient(120deg,var(--teal),var(--violet) 55%,var(--pink));-webkit-background-clip:text;background-clip:text;color:transparent;font-weight:800}
 [dir=rtl] .brand,[dir=rtl] .splash-word{direction:ltr}
 .stitch-info{position:absolute;left:0;right:0;top:calc(10px + var(--sat));text-align:center;font-size:.72rem;color:var(--muted);padding:0 50px}
@@ -1880,7 +1880,7 @@ $('obPhoto').onchange = async (e) => {
 $('obDone').onclick = () => {
   const first = !hasProfile();
   ME.name = $('obName').value.trim().slice(0, 24); ME.photo = draftPhoto; saveProfile(); applyProfile();
-  $('onboard').hidden = true; toast(`Welcome, ${ME.name} ✨`); haptic('medium');
+  $('onboard').hidden = true; haptic('medium');
   portals.forEach((p) => addMarker(p));
   if (first && !portals.length) setTimeout(openCreate, 700);
 };
