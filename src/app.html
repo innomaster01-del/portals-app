@@ -867,7 +867,14 @@ function toast(text) {
 /* ---------- native phone features (Capacitor). In a normal browser these fall back quietly. ---------- */
 const CAPX = window.Capacitor, NATIVE = !!CAPX?.isNativePlatform?.();
 const plugins = {};
-const N = (name) => (NATIVE && CAPX.registerPlugin ? (plugins[name] ||= CAPX.registerPlugin(name)) : null);
+// The app loads no Capacitor JavaScript of its own: on Android the native side puts every plugin
+// (ours included) on window.Capacitor.Plugins. registerPlugin only exists when @capacitor/core is bundled.
+const N = (name) => {
+  if (!NATIVE) return null;
+  if (CAPX.Plugins?.[name]) return CAPX.Plugins[name];
+  if (CAPX.registerPlugin) return (plugins[name] ||= CAPX.registerPlugin(name));
+  return null;
+};
 function haptic(kind = 'light') {
   const h = N('Haptics');
   if (h) h.impact({ style: kind.toUpperCase() }).catch(() => {});
