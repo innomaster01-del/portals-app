@@ -879,11 +879,8 @@ async function shareFile(blob, name, text) {
   try {
     if (NATIVE) {
       const FS = N('Filesystem'), SH = N('Share');
-      stage = 'read'; const b64 = await blobToBase64(blob);
       // the file goes to Android in pieces: one big piece is too much for the bridge on some phones
-      const CH = 512 * 1024;
-      stage = 'write'; await FS.writeFile({ path: name, data: b64.slice(0, CH), directory: 'CACHE' });
-      for (let i = CH; i < b64.length; i += CH) await FS.appendFile({ path: name, data: b64.slice(i, i + CH), directory: 'CACHE' });
+      stage = 'write'; await writeNative(blob, name, 'CACHE');
       stage = 'uri'; const { uri } = await FS.getUri({ path: name, directory: 'CACHE' });
       stage = 'share'; await SH.share({ title: text, files: [uri], dialogTitle: text });
       return;
@@ -3012,14 +3009,49 @@ function makeZip(files) {
   e.setUint32(0, 0x06054b50, true); e.setUint16(8, files.length, true); e.setUint16(10, files.length, true); e.setUint32(12, csize, true); e.setUint32(16, off, true);
   return new Blob([...parts, ...central, new Uint8Array(e.buffer)], { type: 'application/zip' });
 }
+// photos are made smaller for the file (1600 px is plenty to check the stitching), so the file stays
+// around 10 MB instead of 40+ MB, which was too much for the phone to prepare and share
+async function shrinkJpeg(blob, max = 1600) {
+  const bmp = await createImageBitmap(blob), k = Math.min(1, max / Math.max(bmp.width, bmp.height));
+  const c = canvas(Math.round(bmp.width * k), Math.round(bmp.height * k)); c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height); bmp.close?.();
+  const out = await new Promise((ok) => c.toBlob(ok, 'image/jpeg', .88)); free(c); return out || blob;
+}
+async function writeNative(blob, name, directory) {
+  const FS = N('Filesystem'), b64 = await blobToBase64(blob), CH = 512 * 1024;
+  await FS.writeFile({ path: name, data: b64.slice(0, CH), directory });
+  for (let i = CH; i < b64.length; i += CH) await FS.appendFile({ path: name, data: b64.slice(i, i + CH), directory });
+}
+let exporting = false;
 async function exportLastCapture() {
-  const cap = await idbGet('lastCapture').catch(() => null);
-  if (!cap) return toast('No capture yet. Open a portal with the camera first');
-  toast('Preparing the capture file…');
-  const files = [], meta = { ...cap, shots: cap.shots.map(({ blob, ...r }, i) => ({ ...r, file: `shot_${String(i).padStart(2, '0')}.jpg` })) };
-  files.push(['meta.json', new TextEncoder().encode(JSON.stringify(meta, null, 1))]);
-  for (let i = 0; i < cap.shots.length; i++) if (cap.shots[i].blob) files.push([meta.shots[i].file, new Uint8Array(await cap.shots[i].blob.arrayBuffer())]);
-  await shareFile(makeZip(files), `portalx-capture-${new Date(cap.at).toISOString().slice(0, 16).replace(/[:T]/g, '-')}.zip`, 'Portal X capture');
+  if (exporting) return;
+  exporting = true; let stage = 'read';
+  try {
+    const cap = await idbGet('lastCapture');
+    if (!cap?.shots?.length) return toast('No capture yet. Open a portal with the camera first');
+    toast('Preparing the capture file…');
+    const files = [], meta = { ...cap, shots: cap.shots.map(({ blob, ...r }, i) => ({ ...r, file: `shot_${String(i).padStart(2, '0')}.jpg` })) };
+    files.push(['meta.json', new TextEncoder().encode(JSON.stringify(meta, null, 1))]);
+    stage = 'photos';
+    for (let i = 0; i < cap.shots.length; i++) {
+      if (!cap.shots[i].blob) continue;
+      if (i % 6 === 0) toast(`Preparing photo ${i + 1}/${cap.shots.length}`);
+      const b = await shrinkJpeg(cap.shots[i].blob);
+      files.push([meta.shots[i].file, new Uint8Array(await b.arrayBuffer())]);
+    }
+    stage = 'zip';
+    const zip = makeZip(files), name = `portalx-capture-${new Date(cap.at).toISOString().slice(0, 16).replace(/[:T]/g, '-')}.zip`;
+    if (NATIVE) {
+      // also keep a copy in the phone's Documents folder, so it can be found in Files even if sharing fails
+      stage = 'save';
+      try { await writeNative(zip, name, 'DOCUMENTS'); toast(`Saved in Documents: ${name}`); await new Promise((r) => setTimeout(r, 1200)); }
+      catch (err) { console.warn('could not save to Documents', err); }
+    }
+    stage = 'share';
+    await shareFile(zip, name, 'Portal X capture');
+  } catch (err) {
+    console.warn('export failed at', stage, err);
+    toast(`Could not prepare the file (${stage}): ${String(err?.message || err).slice(0, 80)}`);
+  } finally { exporting = false; }
 }
 $('pfExport').onclick = exportLastCapture;
 // for checking a capture someone sent: run the exact same stitching again on its photos
@@ -3377,6 +3409,7 @@ const HE = {
   "📦 Send my last capture for checking": "📦 שליחת הצילום האחרון לבדיקה",
   "No capture yet. Open a portal with the camera first": "עוד אין צילום. קודם פותחים פורטל עם המצלמה",
   "Preparing the capture file…": "מכינים את קובץ הצילום…",
+  "Portal X capture": "צילום Portal X",
   "visit": "ביקור",
   "visits": "ביקורים",
   "story": "סטורי",
@@ -3472,7 +3505,7 @@ const HE = {
 };
 const HE_RX = [
   [/^(\d+) portals?$/, '$1 פורטלים'], [/^Horizon (\d+)\/(\d+)$/, 'אופק $1/$2'], [/^Sky (\d+)\/(\d+)$/, 'שמיים $1/$2'], [/^Ground (\d+)\/(\d+)$/, 'קרקע $1/$2'], [/^Top (\d+)\/(\d+)$/, 'למעלה $1/$2'],
-  [/^Sharing failed \((\w+)\): (.*)$/, 'השיתוף נכשל ($1): $2'], [/^Blurred (\d+) faces?$/, 'טושטשו $1 פנים'], [/^Stitching (\d+)\/(\d+)$/, 'מחברים $1/$2'], [/^Tap the spot for (.+)$/, (m, w) => `לבחור נקודה ל${w === 'your comment' ? 'תגובה שלך' : w === 'your story' ? 'סטורי שלך' : w}`],
+  [/^Sharing failed \((\w+)\): (.*)$/, 'השיתוף נכשל ($1): $2'], [/^Preparing photo (\d+)\/(\d+)$/, 'מכינים תמונה $1/$2'], [/^Saved in Documents: (.+)$/, 'נשמר בתיקיית Documents: $1'], [/^Could not prepare the file \((\w+)\): (.*)$/, 'לא הצלחנו להכין את הקובץ ($1): $2'], [/^Blurred (\d+) faces?$/, 'טושטשו $1 פנים'], [/^Stitching (\d+)\/(\d+)$/, 'מחברים $1/$2'], [/^Tap the spot for (.+)$/, (m, w) => `לבחור נקודה ל${w === 'your comment' ? 'תגובה שלך' : w === 'your story' ? 'סטורי שלך' : w}`],
   [/^Welcome, (.+) ✨$/, 'ברוכים הבאים, $1 ✨'], [/^You stepped through to (.+)$/, 'עברת ל$1'], [/^Delete “(.+)”\?$/, 'למחוק את “$1”?'],
   [/^(\d+) comments?$/, '$1 תגובות'], [/^(\d+) stor(y|ies)$/, '$1 סטוריז'], [/^(\d+) visits?$/, '$1 ביקורים'],
 ];

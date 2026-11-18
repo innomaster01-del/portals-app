@@ -8,6 +8,8 @@ const need = [
   '<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />',
   '<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />',
   '<uses-permission android:name="android.permission.VIBRATE" />',
+  // saving the capture file to Documents on Android 10 and older
+  '<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />',
   '<uses-feature android:name="android.hardware.camera" android:required="false" />',
   '<uses-feature android:name="android.hardware.sensor.gyroscope" android:required="false" />',
 ].filter((l) => !xml.includes(l.match(/name="([^"]+)"/)[1]));
