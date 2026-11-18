@@ -2521,7 +2521,7 @@ function findSeams(lows, pairsIdx, Ws) {
 // nearest photo centre, then every pair of neighbouring photos (side by side or one above the other)
 // gets a cut that runs where the two photos agree and around object outlines, the same way as along
 // the horizon. A single owner map means no spot is shown twice and no spot is left out.
-function buildLabels(lows, Ws) {
+function buildLabels(lows, Ws, rows = []) {
   const Hs = Ws / 2, N = lows.length, L = new Int16Array(Ws * Hs).fill(-1), best = new Float32Array(Ws * Hs).fill(-9);
   const mod = (v) => ((v % Ws) + Ws) % Ws, wrapd = (v) => mod(v + Ws / 2) - Ws / 2;
   const vec = (lon, lat) => { const a = lon * DEG, b = lat * DEG; return [Math.cos(b) * Math.sin(a), Math.cos(b) * Math.cos(a), Math.sin(b)]; };
@@ -2535,12 +2535,16 @@ function buildLabels(lows, Ws) {
     if (!A) return;
     for (let y = Math.max(0, A.y0); y < Math.min(Hs, A.y0 + A.h); y++) for (let dx = 0; dx < Math.min(A.w, Ws); dx++) {
       const x = mod(A.x0 + dx), a = A.d[((y - A.y0) * A.w + dx) * 4 + 3]; if (a <= 30) continue;
-      const k = y * Ws + x, sc = cosY[y] * sinX[x] * C[i][0] + cosY[y] * cosX[x] * C[i][1] + sinY[y] * C[i][2] + (a > 200 ? 0 : -3);
+      const k = y * Ws + x, sc = cosY[y] * sinX[x] * C[i][0] + cosY[y] * cosX[x] * C[i][1] + sinY[y] * C[i][2] + (a > 200 ? 0 : -3) + (rows[i] === 0 ? 1 : 0);
       if (sc > best[k]) { best[k] = sc; L[k] = i; }
     }
   });
   const pairs = [];
-  for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++) if (C[i] && C[j]) { const c = C[i][0] * C[j][0] + C[i][1] * C[j][1] + C[i][2] * C[j][2]; if (c > Math.cos(75 * DEG)) pairs.push([i, j, c]); }
+  // The middle row is the best-aligned part (its circle is matched all the way round), so it keeps every
+  // spot it covers well; photos up and down only fill beyond it. The cut between them then lies at the
+  // edge of the middle photos, which is usually plain ceiling or floor, where a small misalignment cannot
+  // be seen. Only photos within the same row (or the top shot) get the searched cuts between them.
+  for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++) if (C[i] && C[j] && (rows[i] === 0) === (rows[j] === 0)) { const c = C[i][0] * C[j][0] + C[i][1] * C[j][1] + C[i][2] * C[j][2]; if (c > Math.cos(75 * DEG)) pairs.push([i, j, c]); }
   pairs.sort((p, q) => q[2] - p[2]);
   const lumA = (A, o) => (A.d[o] * .3 + A.d[o + 1] * .59 + A.d[o + 2] * .11) * A.gain;
   for (const [i, j] of pairs) {
@@ -2708,7 +2712,7 @@ async function stitchAll(rawAll, h0) {
     if (hzIdx.length >= 3) for (let k = 0; k < hzIdx.length; k++) nb.push([hzIdx[k], hzIdx[(k + 1) % hzIdx.length]]);
     else if (hzIdx.length === 2) nb.push([hzIdx[0], hzIdx[1]]);
     seams = { map: findSeams(lows, nb, Ws), scale: W / Ws, nb };
-    if (shots.some((s) => s.row !== 0)) { seams.labels = buildLabels(lows, Ws); seams.Ws = Ws; }
+    if (shots.some((s) => s.row !== 0)) { seams.labels = buildLabels(lows, Ws, shots.map((s) => s.row)); seams.Ws = Ws; }
   }
   let minY = H, maxY = 0; list.forEach((x) => { minY = Math.min(minY, x.y + x.c.height * .06); maxY = Math.max(maxY, x.y + x.c.height * .94); });
   window.__engine = { ...(window.__engine || {}), used: engine, fov: LONG_FOV, k1: LENS_K1, shots: shots.length, gains: gains.map((g) => +g.toFixed(3)) };
@@ -2790,6 +2794,7 @@ function composeSeams(base, list, seams) {
     for (let y0 = 0; y0 < H; y0 += BH) { const bh = Math.min(BH, H - y0), P = x2.getImageData(0, y0, W, bh), d = P.data; for (let i = 3; i < d.length; i += 4) d[i] = d[i] >= 10 ? 255 : 0; x2.putImageData(P, 0, y0); } }
   tctx.globalCompositeOperation = 'destination-over'; tctx.drawImage(base, 0, 0); tctx.globalCompositeOperation = 'source-over';
   free(base);
+  fillHoles(top);
   if (seams?.labels) {
     const lab = { Lb: seams.labels, Ws: seams.Ws };
     smoothColour(top, list, 16, 2, 40, lab, 6);     // broad light and colour: mixed over ~6 degrees around every cut
@@ -2797,8 +2802,29 @@ function composeSeams(base, list, seams) {
   } else smoothColour(top, list);
   return top;
 }
-// Two-band blending: fine detail stays from one photo (sharp, no double images) while broad colour and
-// brightness follow a weighted average of all photos, so seams between exposures disappear.
+// Small holes inside the picture (a spot no photo covered, e.g. a photo placed a little off): filled from
+// the surrounding colours, softly. Only holes with picture above and below them in the same column, so the
+// open sky / ground at the top and bottom are left for fillGaps.
+function fillHoles(pic) {
+  const W = pic.width, H = pic.height, w = Math.round(W / 16), h = Math.round(H / 16);
+  const sm = canvas(w, h), sx = sm.getContext('2d', { willReadFrequently: true }); sx.drawImage(pic, 0, 0, w, h);
+  const d = sx.getImageData(0, 0, w, h).data, hole = new Uint8Array(w * h); let any = false;
+  for (let x = 0; x < w; x++) {
+    let y0 = -1, y1 = -1; for (let y = 0; y < h; y++) if (d[(y * w + x) * 4 + 3] > 200) { if (y0 < 0) y0 = y; y1 = y; }
+    for (let y = y0 + 1; y < y1; y++) if (d[(y * w + x) * 4 + 3] < 250) { hole[y * w + x] = 1; any = true; }
+  }
+  if (!any) return free(sm);
+  // colour for the holes: the picture blurred more and more until every hole has a colour around it
+  const fill = canvas(w, h), fx = fill.getContext('2d', { willReadFrequently: true });
+  for (const r of [16, 8, 4, 2]) { fx.filter = `blur(${r}px)`; fx.drawImage(sm, 0, 0); }
+  fx.filter = 'none'; fx.drawImage(sm, 0, 0);
+  const F = fx.getImageData(0, 0, w, h);
+  for (let k = 0; k < w * h; k++) F.data[k * 4 + 3] = hole[k] ? 255 : 0;
+  fx.putImageData(F, 0, 0);
+  const px = pic.getContext('2d'); px.save(); px.globalCompositeOperation = 'destination-over'; px.imageSmoothingQuality = 'high';
+  px.drawImage(fill, 0, 0, W, H);
+  px.restore(); free(sm, fill);
+}
 // Two-band blending (the idea behind Burt & Adelson multi-band blending, used by OpenCV and PTGui): fine
 // detail comes from one photo per spot, so it stays sharp and never doubles; broad brightness and colour
 // are mixed over a wide, soft band around every cut, so no step or colour change shows where photos meet.
