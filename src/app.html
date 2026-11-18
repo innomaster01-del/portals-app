@@ -2184,7 +2184,15 @@ function takeShot(target) {
   const best = [...prev, shot].sort((x, y) => y.sharp - x.sharp)[0];
   for (const x of [...prev, shot]) x.ok = x === best;
   if (!prev.includes(shot)) cam.raw.push(shot);
-  target.blurry = false; drawMini();
+  target.blurry = false;
+  // the first photos of a row had nothing to compare with: check them again now, and send the person back
+  // (orange dot) to one that turned out much blurrier than the rest
+  const okRow = cam.raw.filter((x) => x.ok && x.row === target.row);
+  if (okRow.length >= 4) {
+    const med = median(okRow.map((x) => x.sharp));
+    for (const x of okRow) { const tg = cam.targets[x.ti]; if (x !== shot && tg && !tg.retried && x.sharp < med * .4) { tg.retried = true; tg.done = false; tg.blurry = true; } }
+  }
+  drawMini();
   return true;
 }
 // the live mini-map: everything photographed so far, the dots still to do, and where the phone points
