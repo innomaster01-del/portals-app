@@ -1946,7 +1946,7 @@ function autoCamera(stream) {
   } catch {}
 }
 // project one camera frame onto the panorama (equirectangular), with soft edges for blending
-function warpShot(frame, R, h0, fov, W, K = LENS_K1) {
+function warpShot(frame, R, h0, fov, W, K = LENS_K1, field = null) {
   const fw = frame.width, fh = frame.height, src = frame.data, H = W / 2;
   const f = (Math.max(fw, fh) / 2) / Math.tan(fov / 2 * DEG), cxp = fw / 2, cyp = fh / 2;
   const toPano = (u, v) => { const [xu, yu] = undistort((u - cxp) / f, -(v - cyp) / f, K), w = mul(R, [xu * f, yu * f, -f]), n = Math.hypot(...w); const hd = Math.atan2(w[0], w[1]) / DEG, lat = Math.asin(w[2] / n) / DEG; return [angDiff(hd, h0), lat]; };
@@ -1957,6 +1957,9 @@ function warpShot(frame, R, h0, fov, W, K = LENS_K1) {
     lonMin = Math.min(lonMin, d); lonMax = Math.max(lonMax, d); latMin = Math.min(latMin, la); latMax = Math.max(latMax, la);
   }
   for (const z of [1, -1]) { const d = mulT(R, [0, 0, z]); if (-d[2] > 0) { const u = cxp + f * d[0] / -d[2], v = cyp - f * d[1] / -d[2]; if (u > 0 && u < fw && v > 0 && v < fh) { lonMin = -180; lonMax = 180; if (z > 0) latMax = 90; else latMin = -90; } } }
+  // room for the local corrections (they move content by a few degrees)
+  let maxD = 0; if (field) for (const [, d] of field) maxD = Math.max(maxD, Math.hypot(d[0], d[1], d[2]) / DEG);
+  if (maxD) { const mg = Math.min(12, maxD + 1); lonMin -= mg; lonMax += mg; latMin = Math.max(-90, latMin - mg); latMax = Math.min(90, latMax + mg); }
   const full = lonMax - lonMin >= 359;
   const x0 = full ? 0 : Math.floor((.75 + (centre[0] + lonMin) / 360) * W), x1 = full ? W : Math.ceil((.75 + (centre[0] + lonMax) / 360) * W);
   const y0 = Math.max(0, Math.floor((.5 - latMax / 180) * H)), y1 = Math.min(H, Math.ceil((.5 - latMin / 180) * H));
@@ -1965,10 +1968,34 @@ function warpShot(frame, R, h0, fov, W, K = LENS_K1) {
   const sinH = new Float32Array(bw), cosH = new Float32Array(bw);
   for (let x = 0; x < bw; x++) { const hd = (h0 + ((x0 + x + .5) / W - .75) * 360) * DEG; sinH[x] = Math.sin(hd); cosH[x] = Math.cos(hd); }
   const fx = fw * .12, fy = fh * .045;
+  // local correction field on a coarse grid (see localFields): where this photo's content must move
+  // so it lands exactly where its neighbours put the same thing
+  let G = 0, gw = 0, GD = null;
+  if (field && field.length) {
+    G = Math.max(4, Math.round(W / 256)); gw = Math.ceil(bw / G) + 2; const gh = Math.ceil(bh / G) + 2; GD = new Float32Array(gw * gh * 3);
+    const SIG = (window.__sig || 2) * DEG, cut = Math.cos(4 * SIG), LAM = window.__lam ?? 1;
+    for (let gy = 0; gy < gh; gy++) {
+      const lat = (.5 - (y0 + gy * G) / H) * Math.PI, cl = Math.cos(lat), sl = Math.sin(lat);
+      for (let gx = 0; gx < gw; gx++) {
+        const hd = (h0 + ((x0 + gx * G) / W - .75) * 360) * DEG, q = [cl * Math.sin(hd), cl * Math.cos(hd), sl];
+        let sx = 0, sy = 0, sz = 0, sw = 0;
+        for (const [pp, d] of field) { const c = pp[0] * q[0] + pp[1] * q[1] + pp[2] * q[2]; if (c < cut) continue; const wt = Math.exp(-(2 - 2 * c) / (2 * SIG * SIG)); sx += wt * d[0]; sy += wt * d[1]; sz += wt * d[2]; sw += wt; }
+        const o = (gy * gw + gx) * 3, k = 1 / (sw + LAM); GD[o] = sx * k; GD[o + 1] = sy * k; GD[o + 2] = sz * k;
+      }
+    }
+  }
   for (let y = 0; y < bh; y++) {
     const lat = (.5 - (y0 + y + .5) / H) * Math.PI, cl = Math.cos(lat), sl = Math.sin(lat);
+    const gyf = y / (G || 1), gy0 = gyf | 0, ty = gyf - gy0;
     for (let x = 0; x < bw; x++) {
-      const wx = cl * sinH[x], wy = cl * cosH[x], wz = sl;
+      let wx = cl * sinH[x], wy = cl * cosH[x], wz = sl;
+      if (GD) {
+        const gxf = x / G, gx0 = gxf | 0, tx = gxf - gx0, o00 = (gy0 * gw + gx0) * 3, o01 = o00 + 3, o10 = o00 + gw * 3, o11 = o10 + 3;
+        const a00 = (1 - tx) * (1 - ty), a01 = tx * (1 - ty), a10 = (1 - tx) * ty, a11 = tx * ty;
+        wx -= GD[o00] * a00 + GD[o01] * a01 + GD[o10] * a10 + GD[o11] * a11;
+        wy -= GD[o00 + 1] * a00 + GD[o01 + 1] * a01 + GD[o10 + 1] * a10 + GD[o11 + 1] * a11;
+        wz -= GD[o00 + 2] * a00 + GD[o01 + 2] * a01 + GD[o10 + 2] * a10 + GD[o11 + 2] * a11;
+      }
       const dx = R[0] * wx + R[3] * wy + R[6] * wz, dy = R[1] * wx + R[4] * wy + R[7] * wz, dz = -(R[2] * wx + R[5] * wy + R[8] * wz);
       if (dz <= 0) continue;
       const xn = dx / dz, yn = dy / dz, sk = 1 + K * (xn * xn + yn * yn), u = cxp + f * xn * sk, v = cyp - f * yn * sk;
@@ -2232,7 +2259,7 @@ function matchPair(A, B, Ra, Rb, fov) {
   }
   for (let i = 0; i < A.n; i++) if (bestA[i] >= 0 && bestB[bestA[i]] === i) cand.push([i, bestA[i]]);   // both ways
   if (cand.length < 8) return [];
-  const thr = Math.cos(1.2 * DEG); let bestQ = null, bestN = 0;
+  const thr = Math.cos(2 * DEG); let bestQ = null, bestN = 0;          // 2 degrees: room for the hand moving a little
   for (let it = 0; it < 600; it++) {
     const p = cand[(Math.random() * cand.length) | 0], q = cand[(Math.random() * cand.length) | 0]; if (p === q) continue;
     if (dot3(WA[p[0]], WA[q[0]]) > Math.cos(2 * DEG)) continue;
@@ -2242,7 +2269,7 @@ function matchPair(A, B, Ra, Rb, fov) {
   }
   if (!bestQ || bestN < 8) return [];
   // guided pass: with the rotation known, look again for every point exactly where it should be
-  const g2 = Math.cos(1 * DEG), out = [], usedB = new Uint8Array(B.n);
+  const g2 = Math.cos(1.5 * DEG), out = [], usedB = new Uint8Array(B.n);
   for (let i = 0; i < A.n; i++) {
     const pa = mat3v(bestQ, WA[i]); let best = 999, bj = -1;
     for (let j = 0; j < B.n; j++) { if (dot3(pa, WB[j]) < g2) continue; const d = ham(i, j); if (d < best) { best = d; bj = j; } }
@@ -2251,6 +2278,73 @@ function matchPair(A, B, Ra, Rb, fov) {
   out.Q = bestQ;
   return out.length >= 10 ? out : [];
 }
+// Local alignment (parallax). A phone held in the hand moves a little between photos, so things close to
+// it (a TV, a shelf, the ceiling) land a few degrees apart in neighbouring photos even when every rotation
+// is right. Here the overlap of every pair of neighbouring photos is compared patch by patch (normalised
+// cross-correlation, coarse then fine, so brightness differences do not matter): where does this patch of
+// photo A appear in photo B? Answers that disagree with the answers around them are dropped. Each answer
+// says "this spot belongs half way between", and warpShot bends both photos smoothly by those amounts,
+// so neighbours agree where they meet: no doubled objects, no broken edges.
+function denseFields(lows, Ws, h0) {
+  const Hs = Ws / 2, N = lows.length, S = Array.from({ length: N }, () => []);
+  const mod = (v) => ((v % Ws) + Ws) % Ws;
+  const LU = lows.map((A) => { if (!A) return null; const l = new Float32Array(A.w * A.h), ok = new Uint8Array(A.w * A.h); for (let k = 0; k < l.length; k++) { const o = k * 4; l[k] = A.d[o] * .3 + A.d[o + 1] * .59 + A.d[o + 2] * .11; ok[k] = A.d[o + 3] > 220; } return { l, ok }; });
+  const idx = (A, X, Y) => { if (Y < A.y0 || Y >= A.y0 + A.h) return -1; const dx = mod(X - A.x0); return dx < A.w ? (Y - A.y0) * A.w + dx : -1; };
+  const vec = (X, Y) => { const hd = (h0 + ((X + .5) / Ws - .75) * 360) * DEG, lat = (.5 - (Y + .5) / Hs) * Math.PI; return [Math.cos(lat) * Math.sin(hd), Math.cos(lat) * Math.cos(hd), Math.sin(lat)]; };
+  const vecs = lows.map((A) => A && (() => { const a = A.lon * DEG, b = A.lat * DEG; return [Math.cos(b) * Math.sin(a), Math.cos(b) * Math.cos(a), Math.sin(b)]; })());
+  const R = 7, STEP = 9, SR = 20;                       // patch 15 px (~5 degrees), search +-20 px (~7 degrees)
+  const pa = new Float32Array((2 * R + 1) ** 2);
+  for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++) {
+    const A = lows[i], B = lows[j]; if (!A || !B || dot3(vecs[i], vecs[j]) < Math.cos(75 * DEG)) continue;
+    const LA = LU[i], LB = LU[j], box = A.w <= B.w ? A : B;
+    const y0 = Math.max(A.y0, B.y0, Math.round(Hs * .17)) + R, y1 = Math.min(A.y0 + A.h, B.y0 + B.h, Math.round(Hs * .83)) - R;
+    const found = [];
+    for (let Y = y0; Y < y1; Y += STEP) for (let u = R; u < Math.min(box.w, Ws) - R; u += STEP) {
+      const X = box.x0 + u;
+      // the patch must be fully inside both photos and have some texture
+      let ok = true, m = 0, n = 0;
+      for (let dy = -R; dy <= R && ok; dy++) for (let dx = -R; dx <= R; dx++) {
+        const ia = idx(A, X + dx, Y + dy), ib = idx(B, X + dx, Y + dy);
+        if (ia < 0 || ib < 0 || !LA.ok[ia] || !LB.ok[ib]) { ok = false; break; }
+        const v = LA.l[ia]; pa[n++] = v; m += v;
+      }
+      if (!ok) continue;
+      m /= n; let va = 0; for (let k = 0; k < n; k++) { pa[k] -= m; va += pa[k] * pa[k]; }
+      if (va / n < 40) continue;                          // plain wall: nothing to measure
+      const ncc = (sx, sy, sub) => {
+        let s1 = 0, s2 = 0, sab = 0, c = 0;
+        for (let dy = -R; dy <= R; dy += sub) for (let dx = -R; dx <= R; dx += sub) {
+          const ib = idx(B, X + dx + sx, Y + dy + sy); if (ib < 0 || !LB.ok[ib]) return -1;
+          const b = LB.l[ib], a = pa[(dy + R) * (2 * R + 1) + dx + R]; s1 += b; s2 += b * b; sab += a * b; c++;
+        }
+        const mb = s1 / c, vb = s2 / c - mb * mb; if (vb < 4) return -1;
+        return (sab / c) / Math.sqrt(vb * (va / n));
+      };
+      let best = -1, bx = 0, by = 0; const all = [];
+      for (let sy = -SR; sy <= SR; sy += 2) for (let sx = -SR; sx <= SR; sx += 2) { const c = ncc(sx, sy, 2); all.push(c, sx, sy); if (c > best) { best = c; bx = sx; by = sy; } }
+      if (best < .5) continue;
+      // the answer must be clear: no other place almost as good (repeating patterns, plain areas)
+      let second = -1; for (let k = 0; k < all.length; k += 3) if ((Math.abs(all[k + 1] - bx) > 4 || Math.abs(all[k + 2] - by) > 4) && all[k] > second) second = all[k];
+      if (best - second < .12) continue;
+      const cx = bx, cy = by; best = -1;
+      for (let sy = cy - 2; sy <= cy + 2; sy++) for (let sx = cx - 2; sx <= cx + 2; sx++) { const c = ncc(sx, sy, 1); if (c > best) { best = c; bx = sx; by = sy; } }
+      if (best < .75 || Math.abs(bx) >= SR || Math.abs(by) >= SR) continue;
+      found.push([X, Y, bx, by]);
+    }
+    // drop answers that disagree with the answers around them
+    for (const f of found) {
+      const nb = found.filter((g) => g !== f && Math.abs(wrapW(g[0] - f[0], Ws)) <= STEP * 2.5 && Math.abs(g[1] - f[1]) <= STEP * 2.5);
+      if (nb.length < 3) continue;
+      const mx = nb.map((g) => g[2]).sort((p, q) => p - q)[nb.length >> 1], my = nb.map((g) => g[3]).sort((p, q) => p - q)[nb.length >> 1];
+      if (Math.abs(f[2] - mx) > 2 || Math.abs(f[3] - my) > 2) continue;
+      const [X, Y, sx, sy] = f, pA = vec(X, Y), pB = vec(X + sx, Y + sy), mid = vec(X + sx / 2, Y + sy / 2);
+      S[i].push([mid, [mid[0] - pA[0], mid[1] - pA[1], mid[2] - pA[2]]]);
+      S[j].push([mid, [mid[0] - pB[0], mid[1] - pB[1], mid[2] - pB[2]]]);
+    }
+  }
+  return S;
+}
+const wrapW = (v, W) => ((v % W) + W * 1.5) % W - W / 2;
 function solveLinear(H, g) {   // Gaussian elimination with partial pivoting; H is n x n (array of rows), solves H x = g
   const n = g.length, M = H.map((r, i) => [...r, g[i]]);
   for (let c = 0; c < n; c++) {
@@ -2471,7 +2565,7 @@ async function stitchAll(rawAll, h0) {
     } else LONG_FOV = known;
   }
   // ---- feature engine: match points between photos and solve every rotation and the lens together ----
-  let Rs = shots.map((s) => s.R), gains = shots.map(() => 1), engine = false, pairs = [];
+  let Rs = shots.map((s) => s.R), gains = shots.map(() => 1), engine = false, pairs = [], fields = shots.map(() => null);
   if (window.jsfeat && !window.__noEngine && shots.length >= 2) {
     $('stitchText').textContent = 'Finding matching points'; await nextFrame();
     const F = shots.map((s) => s.F || extractFeatures(s.small));
@@ -2514,19 +2608,34 @@ async function stitchAll(rawAll, h0) {
       if (sn > 1e-9) { const G = expRot(ax.map((v) => v / sn * Math.asin(Math.min(1, sn)))); ba.Rs = ba.Rs.map((R) => mat3m(G, R)); }
       window.__engine.closed = closed;
       window.__engine.ba = { fov: ba.fov, k1: ba.k1, rms: ba.rms, n: ba.n };
-      if (ba.fov > 45 && ba.fov < 95 && ba.rms < .6) {
+      if (ba.fov > 45 && ba.fov < 95 && ba.rms < 2) {
+        // photos that found no partner (a plain ceiling, say) take the correction of their nearest
+        // matched neighbour: the compass error is local, so this puts them where the sensors and the
+        // neighbour agree instead of where the compass alone would
+        const sens = shots.map((s) => s.Rc || s.R), fw = (R) => mat3v(R, [0, 0, -1]);
+        shots.forEach((s, i) => {
+          if (linked.has(i)) return;
+          let bj = -1, bd = -2; for (const j of linked) { const d = dot3(fw(sens[i]), fw(sens[j])); if (d > bd) { bd = d; bj = j; } }
+          if (bj >= 0) ba.Rs[i] = mat3m(ba.Rs[bj], mat3m(T(sens[bj]), sens[i]));
+        });
         Rs = ba.Rs; LONG_FOV = Math.round(ba.fov * 100) / 100; if (closed) LENS_K1 = Math.round(ba.k1 * 1e4) / 1e4; engine = true;
         gains = solveGains(F, pairs);
         if (closed) { store.set('fov', LONG_FOV); store.set('fovOk', true); store.set('k1', LENS_K1); }
+
       }
     }
   }
   if (!engine && hz.length >= 8) { store.set('fov', LONG_FOV); store.set('fovOk', true); }
+  if (engine && !window.__noLocal) {
+    $('stitchText').textContent = 'Fine-tuning every edge'; await nextFrame();
+    const lows0 = shots.map((s, i) => { const w = warpShot(s.small, Rs[i], h0, LONG_FOV, 1024, LENS_K1); if (!w) return null; const d = w.c.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w.w, w.h).data; free(w.c); return { ...w, d }; });
+    fields = denseFields(lows0, 1024, h0); window.__engine.local = fields.map((f) => f.length);
+  }
   const mosaic = bigCanvas(W, H), m = mosaic.getContext('2d'), list = [];
   const draw = (it) => { m.save(); if (Math.abs(it.gain - 1) > .01) m.filter = `brightness(${it.gain})`; for (const off of [0, -W, W]) m.drawImage(it.c, it.x + off, it.y); m.restore(); };
   for (let i = 0; i < shots.length; i++) {
     $('stitchText').textContent = `Stitching ${i + 1}/${shots.length}`; await nextFrame();
-    const s = shots[i], w = warpShot(await decodeFrame(s.blob), Rs[i], h0, LONG_FOV, W); if (!w) continue;
+    const s = shots[i], w = warpShot(await decodeFrame(s.blob), Rs[i], h0, LONG_FOV, W, LENS_K1, fields[i]); if (!w) continue;
     // the engine already solved the positions; without it, slide each photo onto what is painted
     const fix = !engine && ALIGN && list.length ? alignStrip(w.c, w.x0, w.y0, w.w, w.h, mosaic) : null;
     const dx = fix?.dx || 0, dy = fix?.dy || 0;
@@ -2547,7 +2656,7 @@ async function stitchAll(rawAll, h0) {
   let seams = null;
   if (engine) {
     $('stitchText').textContent = 'Choosing the seams'; await nextFrame();
-    const Ws = 1024, lows = shots.map((s, i) => { const w = warpShot(s.small, Rs[i], h0, LONG_FOV, Ws); if (!w) return null; const d = w.c.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w.w, w.h).data; return { ...w, d, gain: gains[i] }; });
+    const Ws = 1024, lows = shots.map((s, i) => { const w = warpShot(s.small, Rs[i], h0, LONG_FOV, Ws, LENS_K1, fields[i]); if (!w) return null; const d = w.c.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w.w, w.h).data; return { ...w, d, gain: gains[i] }; });
     gains = solveGainsArea(lows, Ws); lows.forEach((l, i) => { if (l) l.gain = gains[i]; }); list.forEach((it) => { it.gain = gains[it.si]; });
     const hzIdx = shots.map((s, i) => i).filter((i) => shots[i].row === 0), nb = [];
     if (hzIdx.length >= 3) for (let k = 0; k < hzIdx.length; k++) nb.push([hzIdx[k], hzIdx[(k + 1) % hzIdx.length]]);
@@ -2635,9 +2744,9 @@ function composeSeams(base, list, seams) {
     for (let y0 = 0; y0 < H; y0 += BH) { const bh = Math.min(BH, H - y0), P = x2.getImageData(0, y0, W, bh), d = P.data; for (let i = 3; i < d.length; i += 4) d[i] = d[i] >= 10 ? 255 : 0; x2.putImageData(P, 0, y0); } }
   tctx.globalCompositeOperation = 'destination-over'; tctx.drawImage(base, 0, 0); tctx.globalCompositeOperation = 'source-over';
   free(base);
-  smoothColour(top, list);
+  smoothColour(top, list, 16, 2, seams?.labels ? 20 : 50);
   // a second, finer pass: a small brightness step left at a cut on a plain wall or ceiling is spread out
-  if (seams?.labels) smoothColour(top, list, 4, 3, 16);
+  if (seams?.labels) smoothColour(top, list, 4, 3, 8);
   return top;
 }
 // Two-band blending: fine detail stays from one photo (sharp, no double images) while broad colour and
