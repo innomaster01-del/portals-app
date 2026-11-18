@@ -1904,9 +1904,20 @@ let LENS_K1 = 0;                           // barrel / pincushion distortion of 
 // a pixel's position without lens distortion (normalised by the focal length)
 function undistort(xd, yd, k) { let xu = xd, yu = yd; for (let i = 0; i < 4; i++) { const s = 1 + k * (xu * xu + yu * yu); xu = xd / s; yu = yd / s; } return [xu, yu]; }
 let LONG_FOV = 66;                         // field of view along the long side of the video; measured per phone on the first photos
-// sky and ground rows sit closer to the horizon (38 degrees, not 45) so each overlaps the middle row by
-// about 40% of a photo, and have 10 photos each: more shared detail to align on, more room for the cut
-const ROWS = [{ name: 'Horizon', pitch: 0, n: 12 }, { name: 'Sky', pitch: 38, n: 10 }, { name: 'Ground', pitch: -38, n: 10 }, { name: 'Top', pitch: 85, n: 1 }];
+// The dots are laid out from the real field of view of the lens in use (as open photo-sphere apps do):
+// about a third of a photo of overlap side by side, ~40% between the middle and the sky / ground rows,
+// a top shot only when the sky row does not reach the top (main lens: 11 + 9 + 9 + 1 = 30 photos).
+let ROWS = planRows(66);
+function planRows(longFov) {
+  const tanL = Math.tan(longFov / 2 * DEG), vf = 2 * Math.atan(tanL * .9) / DEG, hf = 2 * Math.atan(tanL * .75 * .9) / DEG;
+  const n0 = Math.max(6, Math.ceil(360 / (hf * .7)));
+  const p = Math.min(60, Math.round(vf * .6)), n1 = Math.max(4, Math.ceil(360 * Math.cos(p * DEG) / (hf * .7)));
+  const rows = [{ name: 'Horizon', pitch: 0, n: n0 }, { name: 'Sky', pitch: p, n: n1 }, { name: 'Ground', pitch: -p, n: n1 }];
+  if (p + vf / 2 < 86) rows.push({ name: 'Top', pitch: 85, n: 1 });
+  return rows;
+}
+// lens settings are remembered per lens (main or ultra-wide)
+const lensKey = (k) => k + (cam?.zoom && cam.zoom < .99 ? '@' + cam.zoom.toFixed(2) : '');
 let cam = null;
 // W3C device orientation -> rotation matrix (device -> world; world x = east, y = north, z = up)
 function rotationOf(e) {
@@ -1942,10 +1953,21 @@ async function startCapture() {
   const video = document.createElement('video');
   video.playsInline = true; video.muted = true; video.srcObject = stream;
   await video.play().catch(() => {});
-  const targets = ROWS.flatMap((r, ri) => Array.from({ length: r.n }, (_, k) => ({ row: ri, yaw: k * 360 / r.n, pitch: r.pitch, done: false })));
-  if (store.get('fov', 0)) LONG_FOV = store.get('fov', 66);
-  LENS_K1 = store.get('k1', 0);
-  cam = { D: [1, 0, 0, 0, 1, 0, 0, 0, 1], raw: [], pending: [], dark: false, full: false, paused: false, stream, video, targets, h0: null, R: null, sensors: false, spin: 0, started: false, still: 0, lastShot: 0, shots: 0 };
+  // the ultra-wide lens (zoom below 1x) would need far fewer photos, but matching its strongly stretched
+  // edges between photos is not reliable yet, so it stays off unless switched on for testing
+  let zoom = 1;
+  try {
+    const tr = stream.getVideoTracks()[0], zc = tr.getCapabilities?.().zoom;
+    if (window.__wideZoom) zoom = window.__wideZoom;
+    else if (zc && zc.min < .95 && store.get('wide', false)) { await tr.applyConstraints({ advanced: [{ zoom: zc.min }] }); zoom = tr.getSettings?.().zoom || zc.min; }
+  } catch { zoom = 1; }
+  cam = { zoom };
+  const mainFov = store.get('fov', 0) || 66;
+  LONG_FOV = store.get(lensKey('fov'), 0) || (zoom < .99 ? Math.min(118, 2 * Math.atan(Math.tan(mainFov / 2 * DEG) / zoom) / DEG) : mainFov);
+  LENS_K1 = store.get(lensKey('k1'), 0);
+  ROWS = planRows(LONG_FOV);
+  const targets = ROWS.flatMap((r, ri) => Array.from({ length: r.n }, (_, k) => ({ row: ri, yaw: k * 360 / r.n + (ri ? 180 / r.n : 0), pitch: r.pitch, done: false })));
+  cam = { zoom, D: [1, 0, 0, 0, 1, 0, 0, 0, 1], raw: [], pending: [], dark: false, full: false, paused: false, stream, video, targets, h0: null, R: null, sensors: false, spin: 0, started: false, still: 0, lastShot: 0, shots: 0 };
   addEventListener('deviceorientation', onCamOri); addEventListener('devicemotion', onCamMotion);
   autoCamera(stream); keepAwake(true);
   step('capture'); runViewfinder();
@@ -2082,9 +2104,9 @@ function closureFor(hz, h0, fov) {
   }
   return n >= warps.length - 1 ? S / W * 360 : null;      // degrees left open after a full turn
 }
-function measureLens(hz, h0) {
+function measureLens(hz, h0, guess = 70) {
   calibLog = [];
-  const F = [54, 58, 62, 66, 70, 74, 78, 82, 86], S = F.map((f) => closureFor(hz, h0, f));
+  const F = guess > 90 ? [86, 90, 94, 98, 102, 106, 110, 114, 118] : [54, 58, 62, 66, 70, 74, 78, 82, 86], S = F.map((f) => closureFor(hz, h0, f));
   F.forEach((f, i) => calibLog.push([f, S[i] == null ? null : +S[i].toFixed(2)]));
   // where the gap crosses zero (going up); if more than one, the one nearest a typical phone lens
   const hits = [];
@@ -2092,7 +2114,7 @@ function measureLens(hz, h0) {
     const a = S[i], b = S[i + 1];
     if (a != null && b != null && a < 0 && b >= 0) hits.push(F[i] + (F[i + 1] - F[i]) * a / (a - b));
   }
-  return hits.sort((x, y) => Math.abs(x - 70) - Math.abs(y - 70))[0] ?? null;
+  return hits.sort((x, y) => Math.abs(x - guess) - Math.abs(y - guess))[0] ?? null;
 }
 const nextFrame = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
 let ALIGN = true;
@@ -2573,13 +2595,13 @@ async function stitchAll(rawAll, h0) {
   const raw = rawAll.filter((s) => s.ok || !rawAll.some((x) => x.ti === s.ti && x.ok));
   const W = PANO_W, H = W / 2, shots = raw.slice().sort((a, b) => a.row - b.row || a.yaw - b.yaw), hz = shots.filter((s) => s.row === 0);
   // a starting value for the lens: measured before on this phone, or measured now from the horizon circle
-  if (hz.length >= 8) {
-    const known = store.get('fovOk', false) && store.get('fov', 0);
+  if (hz.length >= 6) {
+    const known = store.get(lensKey('fovOk'), false) && store.get(lensKey('fov'), 0);
     const gap = known ? closureFor(hz, h0, known) : null;
     if (!known || gap == null || Math.abs(gap) > 1.2) {
       $('stitchText').textContent = 'Measuring your camera'; await nextFrame();
-      const fov = measureLens(hz, h0);
-      if (fov && fov > 45 && fov < 95) LONG_FOV = Math.round(fov * 10) / 10;
+      const fov = measureLens(hz, h0, LONG_FOV);
+      if (fov && fov > 45 && fov < 125) LONG_FOV = Math.round(fov * 10) / 10;
     } else LONG_FOV = known;
   }
   // ---- feature engine: match points between photos and solve every rotation and the lens together ----
@@ -2588,13 +2610,29 @@ async function stitchAll(rawAll, h0) {
     $('stitchText').textContent = 'Finding matching points'; await nextFrame();
     const F = shots.map((s) => s.F || extractFeatures(s.small));
     const fwdOf = (R) => mat3v(R, [0, 0, -1]), sm = shots[0].small, hfov = 2 * Math.atan(Math.tan(LONG_FOV / 2 * DEG) * Math.min(sm.width, sm.height) / Math.max(sm.width, sm.height)) / DEG;
-    for (let a = 0; a < shots.length; a++) for (let b = a + 1; b < shots.length; b++) {
-      const Ra = shots[a].Rc || shots[a].R, Rb = shots[b].Rc || shots[b].R;
-      if (dot3(fwdOf(Ra), fwdOf(Rb)) < Math.cos(Math.min(70, LONG_FOV * .95) * DEG)) continue;
-      const m = matchPair(F[a], F[b], Ra, Rb, LONG_FOV);
-      if (m.length) pairs.push({ a, b, m, Q: m.Q });
-      if ((a * shots.length + b) % 6 === 0) await nextFrame();
-    }
+    const T0 = (M) => [M[0], M[3], M[6], M[1], M[4], M[7], M[2], M[5], M[8]];
+    const chain = (prs, n, sens) => {           // rotations chained along the strongest matches
+      const C = new Array(n).fill(null); if (!prs.length) return sens;
+      C[prs.slice().sort((x, y) => y.m.length - x.m.length)[0].a] = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+      for (let grown = true; grown;) { grown = false;
+        for (const pr of prs.slice().sort((x, y) => y.m.length - x.m.length)) {
+          if (C[pr.a] && !C[pr.b]) { C[pr.b] = mat3m(C[pr.a], T0(pr.Q)); grown = true; }
+          else if (C[pr.b] && !C[pr.a]) { C[pr.a] = mat3m(C[pr.b], pr.Q); grown = true; } } }
+      return sens.map((R, i) => (C[i] ? mat3m(C[i], R) : R));
+    };
+    const matchAll = async (only) => {
+      const out = [];
+      for (let a = 0; a < shots.length; a++) for (let b = a + 1; b < shots.length; b++) {
+        if (only && !(only(a) && only(b))) continue;
+        const Ra = shots[a].Rc || shots[a].R, Rb = shots[b].Rc || shots[b].R;
+        if (dot3(fwdOf(Ra), fwdOf(Rb)) < Math.cos(Math.min(LONG_FOV > 90 ? 95 : 70, LONG_FOV * .95) * DEG)) continue;
+        const m = matchPair(F[a], F[b], Ra, Rb, LONG_FOV);
+        if (m.length) out.push({ a, b, m, Q: m.Q });
+        if ((a * shots.length + b) % 6 === 0) await nextFrame();
+      }
+      return out;
+    };
+    pairs.push(...(await matchAll()));
     // connected photos: the engine is used only if almost every photo found its neighbours
     const linked = new Set(pairs.flatMap((p) => [p.a, p.b]));
     window.__engine = { pairs: pairs.map((p) => [p.a, p.b, p.m.length]), linked: linked.size, n: shots.length };
@@ -2602,22 +2640,12 @@ async function stitchAll(rawAll, h0) {
       $('stitchText').textContent = 'Lining up every photo'; await nextFrame();
       // starting point from the photos themselves: chain the rotations found between matched photos,
       // strongest links first (a spanning tree), so a wrong compass reading does not matter
-      const C = shots.map(() => null), root = pairs.slice().sort((x, y) => y.m.length - x.m.length)[0].a;
-      C[root] = [1, 0, 0, 0, 1, 0, 0, 0, 1];
-      const T = (M) => [M[0], M[3], M[6], M[1], M[4], M[7], M[2], M[5], M[8]];
-      for (let grown = true; grown;) {
-        grown = false;
-        for (const pr of pairs.slice().sort((x, y) => y.m.length - x.m.length)) {
-          if (C[pr.a] && !C[pr.b]) { C[pr.b] = mat3m(C[pr.a], T(pr.Q)); grown = true; }
-          else if (C[pr.b] && !C[pr.a]) { C[pr.a] = mat3m(C[pr.b], pr.Q); grown = true; }
-        }
-      }
-      const start = shots.map((s, i) => s.Rc || (C[i] ? mat3m(C[i], s.R) : s.R));
+      const T = T0, start = chain(pairs, shots.length, shots.map((s) => s.R)).map((R, i) => shots[i].Rc || R);
       // the lens is only measured when the horizon circle is closed (every neighbour matched, all the way round);
       // otherwise the value measured before on this phone is kept
       const hzI = shots.map((s, i) => i).filter((i) => shots[i].row === 0), has = (x, y) => pairs.some((p) => (p.a === x && p.b === y) || (p.a === y && p.b === x));
-      const closed = hzI.length >= 8 && hzI.every((x, k) => has(x, hzI[(k + 1) % hzI.length]));
-      const known = store.get('fovOk', false) && store.get('fov', 0);
+      const closed = hzI.length >= 6 && hzI.every((x, k) => has(x, hzI[(k + 1) % hzI.length]));
+      const known = store.get(lensKey('fovOk'), false) && store.get(lensKey('fov'), 0);
       if (!closed && known) LONG_FOV = known;
       const ba = bundleAdjust(F, start, pairs, LONG_FOV, !closed, LENS_K1);
       // level the horizon by gravity (the accelerometer is reliable even where the compass is not)
@@ -2626,7 +2654,7 @@ async function stitchAll(rawAll, h0) {
       if (sn > 1e-9) { const G = expRot(ax.map((v) => v / sn * Math.asin(Math.min(1, sn)))); ba.Rs = ba.Rs.map((R) => mat3m(G, R)); }
       window.__engine.closed = closed;
       window.__engine.ba = { fov: ba.fov, k1: ba.k1, rms: ba.rms, n: ba.n };
-      if (ba.fov > 45 && ba.fov < 95 && ba.rms < 2) {
+      if (ba.fov > 45 && ba.fov < 125 && ba.rms < 2) {
         // photos that found no partner (a plain ceiling, say) take the correction of their nearest
         // matched neighbour: the compass error is local, so this puts them where the sensors and the
         // neighbour agree instead of where the compass alone would
@@ -2638,12 +2666,12 @@ async function stitchAll(rawAll, h0) {
         });
         Rs = ba.Rs; LONG_FOV = Math.round(ba.fov * 100) / 100; if (closed) LENS_K1 = Math.round(ba.k1 * 1e4) / 1e4; engine = true;
         gains = solveGains(F, pairs);
-        if (closed) { store.set('fov', LONG_FOV); store.set('fovOk', true); store.set('k1', LENS_K1); }
+        if (closed) { store.set(lensKey('fov'), LONG_FOV); store.set(lensKey('fovOk'), true); store.set(lensKey('k1'), LENS_K1); }
 
       }
     }
   }
-  if (!engine && hz.length >= 8) { store.set('fov', LONG_FOV); store.set('fovOk', true); }
+  if (!engine && hz.length >= 6) { store.set(lensKey('fov'), LONG_FOV); store.set(lensKey('fovOk'), true); }
   if (engine && !window.__noLocal) {
     $('stitchText').textContent = 'Fine-tuning every edge'; await nextFrame();
     const lows0 = shots.map((s, i) => { const w = warpShot(s.small, Rs[i], h0, LONG_FOV, 1024, LENS_K1); if (!w) return null; const d = w.c.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w.w, w.h).data; free(w.c); return { ...w, d }; });
@@ -3008,7 +3036,7 @@ async function finishCapture() {
 async function saveLastCapture(c) {
   try {
     const v = c.video || {};
-    await idbSet('lastCapture', { at: Date.now(), h0: c.h0, fov: LONG_FOV, k1: LENS_K1, engine: window.__engine || null, ua: navigator.userAgent, video: [v.videoWidth || 0, v.videoHeight || 0],
+    await idbSet('lastCapture', { at: Date.now(), h0: c.h0, zoom: c.zoom || 1, fov: LONG_FOV, k1: LENS_K1, engine: window.__engine || null, ua: navigator.userAgent, video: [v.videoWidth || 0, v.videoHeight || 0],
       shots: c.raw.map((s) => ({ R: s.R, Rc: s.Rc, row: s.row, yaw: s.yaw, ti: s.ti, ok: s.ok, sharp: s.sharp, blob: s.blob })) });
   } catch (err) { console.warn('could not keep the capture', err); }
 }
