@@ -1888,7 +1888,9 @@ let LENS_K1 = 0;                           // barrel / pincushion distortion of 
 // a pixel's position without lens distortion (normalised by the focal length)
 function undistort(xd, yd, k) { let xu = xd, yu = yd; for (let i = 0; i < 4; i++) { const s = 1 + k * (xu * xu + yu * yu); xu = xd / s; yu = yd / s; } return [xu, yu]; }
 let LONG_FOV = 66;                         // field of view along the long side of the video; measured per phone on the first photos
-const ROWS = [{ name: 'Horizon', pitch: 0, n: 12 }, { name: 'Sky', pitch: 45, n: 8 }, { name: 'Ground', pitch: -45, n: 8 }, { name: 'Top', pitch: 85, n: 1 }];
+// sky and ground rows sit closer to the horizon (38 degrees, not 45) so each overlaps the middle row by
+// about 40% of a photo, and have 10 photos each: more shared detail to align on, more room for the cut
+const ROWS = [{ name: 'Horizon', pitch: 0, n: 12 }, { name: 'Sky', pitch: 38, n: 10 }, { name: 'Ground', pitch: -38, n: 10 }, { name: 'Top', pitch: 85, n: 1 }];
 let cam = null;
 // W3C device orientation -> rotation matrix (device -> world; world x = east, y = north, z = up)
 function rotationOf(e) {
@@ -2744,26 +2746,48 @@ function composeSeams(base, list, seams) {
     for (let y0 = 0; y0 < H; y0 += BH) { const bh = Math.min(BH, H - y0), P = x2.getImageData(0, y0, W, bh), d = P.data; for (let i = 3; i < d.length; i += 4) d[i] = d[i] >= 10 ? 255 : 0; x2.putImageData(P, 0, y0); } }
   tctx.globalCompositeOperation = 'destination-over'; tctx.drawImage(base, 0, 0); tctx.globalCompositeOperation = 'source-over';
   free(base);
-  smoothColour(top, list, 16, 2, seams?.labels ? 20 : 50);
-  // a second, finer pass: a small brightness step left at a cut on a plain wall or ceiling is spread out
-  if (seams?.labels) smoothColour(top, list, 4, 3, 8);
+  if (seams?.labels) {
+    const lab = { Lb: seams.labels, Ws: seams.Ws };
+    smoothColour(top, list, 16, 2, 40, lab, 6);     // broad light and colour: mixed over ~6 degrees around every cut
+    smoothColour(top, list, 4, 2, 16, lab, 2);      // finer shading: over ~2 degrees
+  } else smoothColour(top, list);
   return top;
 }
 // Two-band blending: fine detail stays from one photo (sharp, no double images) while broad colour and
 // brightness follow a weighted average of all photos, so seams between exposures disappear.
-function smoothColour(pic, list, S = 16, BL = 2, CL = 50) {
+// Two-band blending (the idea behind Burt & Adelson multi-band blending, used by OpenCV and PTGui): fine
+// detail comes from one photo per spot, so it stays sharp and never doubles; broad brightness and colour
+// are mixed over a wide, soft band around every cut, so no step or colour change shows where photos meet.
+// With an owner map (lab) the soft band follows the owners; without one, every photo is averaged.
+function smoothColour(pic, list, S = 16, BL = 2, CL = 50, lab = null, SOFT = 3) {
   const W = pic.width, H = pic.height, w = Math.round(W / S), h = Math.round(H / S);
   const sum = new Float32Array(w * h * 3), wt = new Float32Array(w * h);
+  let ownOf = null;
+  if (lab) {
+    // owner of every low-res spot, then for each photo a soft (box-blurred twice) version of its share
+    const { Lb, Ws } = lab, Hs = Ws / 2, own = new Int16Array(w * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) own[y * w + x] = Lb[Math.min(Hs - 1, Math.floor((y + .5) * Hs / h)) * Ws + Math.min(Ws - 1, Math.floor((x + .5) * Ws / w))];
+    const r = Math.max(1, Math.round(w * SOFT / 360)), tmp = new Float32Array(w * h);
+    const box = (src, dst, horiz) => {
+      if (horiz) for (let y = 0; y < h; y++) { let acc = 0; for (let k = -r; k <= r; k++) acc += src[y * w + ((k % w) + w) % w];
+        for (let x = 0; x < w; x++) { dst[y * w + x] = acc / (2 * r + 1); acc += src[y * w + (x + r + 1) % w] - src[y * w + ((x - r) % w + w) % w]; } }
+      else for (let x = 0; x < w; x++) for (let y = 0; y < h; y++) { let acc = 0, n = 0; for (let k = Math.max(0, y - r); k <= Math.min(h - 1, y + r); k++) { acc += src[k * w + x]; n++; } dst[y * w + x] = acc / n; }
+    };
+    ownOf = (si) => { const a = new Float32Array(w * h); let any = false; for (let j = 0; j < a.length; j++) if (own[j] === si) { a[j] = 1; any = true; } if (!any) return a;
+      for (let pass = 0; pass < 2; pass++) { box(a, tmp, true); box(tmp, a, false); } return a; };
+  }
   for (const it of list) {
+    const ow = ownOf && ownOf(it.si);
     const cw = Math.max(1, Math.round(it.c.width / S)), ch = Math.max(1, Math.round(it.c.height / S));
     const c = canvas(cw, ch), x = c.getContext('2d', { willReadFrequently: true }); x.drawImage(it.c, 0, 0, cw, ch);
     const d = x.getImageData(0, 0, cw, ch).data, ox = Math.round(it.x / S), oy = Math.round(it.y / S);
     for (let y = 0; y < ch; y++) { const Y = oy + y; if (Y < 0 || Y >= h) continue;
       for (let xx = 0; xx < cw; xx++) { const i = (y * cw + xx) * 4, a = d[i + 3] / 255; if (a < .02) continue;
-        const j = Y * w + ((ox + xx) % w + w) % w; sum[j * 3] += d[i] * it.gain * a; sum[j * 3 + 1] += d[i + 1] * it.gain * a; sum[j * 3 + 2] += d[i + 2] * it.gain * a; wt[j] += a; } }
+        const j = Y * w + ((ox + xx) % w + w) % w, aa = ow ? a * ow[j] : a; if (aa < 1e-4) continue;
+        sum[j * 3] += d[i] * it.gain * aa; sum[j * 3 + 1] += d[i + 1] * it.gain * aa; sum[j * 3 + 2] += d[i + 2] * it.gain * aa; wt[j] += aa; } }
   }
   const avg = canvas(w, h), ax = avg.getContext('2d', { willReadFrequently: true }), ad = ax.createImageData(w, h);
-  for (let j = 0; j < w * h; j++) if (wt[j] > .3) { ad.data[j * 4] = sum[j * 3] / wt[j]; ad.data[j * 4 + 1] = sum[j * 3 + 1] / wt[j]; ad.data[j * 4 + 2] = sum[j * 3 + 2] / wt[j]; ad.data[j * 4 + 3] = 255; }
+  for (let j = 0; j < w * h; j++) if (wt[j] > (lab ? .02 : .3)) { ad.data[j * 4] = sum[j * 3] / wt[j]; ad.data[j * 4 + 1] = sum[j * 3 + 1] / wt[j]; ad.data[j * 4 + 2] = sum[j * 3 + 2] / wt[j]; ad.data[j * 4 + 3] = 255; }
   ax.putImageData(ad, 0, 0);
   const low = (src) => { const c = canvas(w, h), x = c.getContext('2d', { willReadFrequently: true }); x.filter = `blur(${BL}px)`; x.drawImage(src, 0, 0, w, h); return x.getImageData(0, 0, w, h).data; };
   const A = low(avg), B = low(pic);
