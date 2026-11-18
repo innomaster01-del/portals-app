@@ -24,6 +24,7 @@ jobs:
         run: npx @capacitor/assets generate --android --iconBackgroundColor "#04050b" --splashBackgroundColor "#04050b"
         continue-on-error: true
       - run: npm run android:permissions
+      - run: node scripts/android-native.mjs
       - run: npx cap sync android
       - name: Build debug APK
         working-directory: android

@@ -874,10 +874,29 @@ function haptic(kind = 'light') {
   else navigator.vibrate?.(kind === 'heavy' ? 30 : kind === 'medium' ? 18 : 10);
 }
 const blobToBase64 = (b) => new Promise((ok, bad) => { const r = new FileReader(); r.onload = () => ok(String(r.result).split(',')[1]); r.onerror = bad; r.readAsDataURL(b); });
-async function shareFile(blob, name, text) {
-  let stage = 'prepare';
+// our own native plugin (native/PortalFilesPlugin.java): writes the file to Downloads/Portal X or
+// Pictures/Portal X through Android's MediaStore, in pieces, then opens the share sheet for it
+async function nativeSave(blob, name, mime, where) {
+  const PF = N('PortalFiles'), { uri } = await PF.begin({ name, mime, where });
+  const b64 = await blobToBase64(blob), CH = 512 * 1024;
+  for (let i = 0; i < b64.length; i += CH) await PF.append({ uri, data: b64.slice(i, i + CH) });
+  await PF.finish({ uri });
+  return uri;
+}
+async function shareFile(blob, name, text, where = 'downloads') {
+  let stage = 'prepare', first = '';
   try {
     if (NATIVE) {
+      const mime = blob.type || (name.endsWith('.zip') ? 'application/zip' : name.endsWith('.jpg') ? 'image/jpeg' : 'application/octet-stream');
+      try {
+        stage = 'save'; const uri = await nativeSave(blob, name, mime, where);
+        toast(where === 'pictures' ? 'Saved in your gallery (Pictures/Portal X)' : 'Saved in Downloads/Portal X');
+        stage = 'share'; await N('PortalFiles').share({ uri, mime, title: text });
+        return;
+      } catch (err) {
+        first = `${stage}: ${String(err?.message || err).slice(0, 60)}`;
+        console.warn('PortalFiles failed, trying the standard way', err);
+      }
       const FS = N('Filesystem'), SH = N('Share');
       // the file goes to Android in pieces: one big piece is too much for the bridge on some phones
       stage = 'write'; await writeNative(blob, name, 'CACHE');
@@ -893,7 +912,7 @@ async function shareFile(blob, name, text) {
     const msg = String(err?.message || err || '');
     if (/cancel/i.test(msg)) return;
     console.warn('share failed at', stage, err);
-    toast(`Sharing failed (${stage}): ${msg.slice(0, 80)}`);
+    toast(`Sharing failed (${stage}): ${msg.slice(0, 80)}${first ? ` | ${first}` : ''}`);
   }
 }
 let wake = null;
@@ -1267,7 +1286,7 @@ async function share360(p) {
     x.drawImage(c, -sh, 0, W, H); x.drawImage(c, W - sh, 0, W, H);
     const blob = await new Promise((ok) => r.toBlob(ok, 'image/jpeg', .86)); free(r);
     const bytes = withGPano(new Uint8Array(await blob.arrayBuffer()), W, H);
-    await shareFile(new Blob([bytes], { type: 'image/jpeg' }), `portal-${p.id}.jpg`, p.title);
+    await shareFile(new Blob([bytes], { type: 'image/jpeg' }), `portal-${p.id}.jpg`, p.title, 'pictures');
   } catch (err) { toast('Could not prepare the photo'); console.warn(err); }
   finally { sharing = false; }
 }
@@ -3040,14 +3059,8 @@ async function exportLastCapture() {
     }
     stage = 'zip';
     const zip = makeZip(files), name = `portalx-capture-${new Date(cap.at).toISOString().slice(0, 16).replace(/[:T]/g, '-')}.zip`;
-    if (NATIVE) {
-      // also keep a copy in the phone's Documents folder, so it can be found in Files even if sharing fails
-      stage = 'save';
-      try { await writeNative(zip, name, 'DOCUMENTS'); toast(`Saved in Documents: ${name}`); await new Promise((r) => setTimeout(r, 1200)); }
-      catch (err) { console.warn('could not save to Documents', err); }
-    }
     stage = 'share';
-    await shareFile(zip, name, 'Portal X capture');
+    await shareFile(new Blob([zip], { type: 'application/zip' }), name, 'Portal X capture');
   } catch (err) {
     console.warn('export failed at', stage, err);
     toast(`Could not prepare the file (${stage}): ${String(err?.message || err).slice(0, 80)}`);
@@ -3410,6 +3423,8 @@ const HE = {
   "No capture yet. Open a portal with the camera first": "עוד אין צילום. קודם פותחים פורטל עם המצלמה",
   "Preparing the capture file…": "מכינים את קובץ הצילום…",
   "Portal X capture": "צילום Portal X",
+  "Saved in your gallery (Pictures/Portal X)": "נשמר בגלריה (Pictures/Portal X)",
+  "Saved in Downloads/Portal X": "נשמר בהורדות (Download/Portal X)",
   "visit": "ביקור",
   "visits": "ביקורים",
   "story": "סטורי",
@@ -3505,7 +3520,7 @@ const HE = {
 };
 const HE_RX = [
   [/^(\d+) portals?$/, '$1 פורטלים'], [/^Horizon (\d+)\/(\d+)$/, 'אופק $1/$2'], [/^Sky (\d+)\/(\d+)$/, 'שמיים $1/$2'], [/^Ground (\d+)\/(\d+)$/, 'קרקע $1/$2'], [/^Top (\d+)\/(\d+)$/, 'למעלה $1/$2'],
-  [/^Sharing failed \((\w+)\): (.*)$/, 'השיתוף נכשל ($1): $2'], [/^Preparing photo (\d+)\/(\d+)$/, 'מכינים תמונה $1/$2'], [/^Saved in Documents: (.+)$/, 'נשמר בתיקיית Documents: $1'], [/^Could not prepare the file \((\w+)\): (.*)$/, 'לא הצלחנו להכין את הקובץ ($1): $2'], [/^Blurred (\d+) faces?$/, 'טושטשו $1 פנים'], [/^Stitching (\d+)\/(\d+)$/, 'מחברים $1/$2'], [/^Tap the spot for (.+)$/, (m, w) => `לבחור נקודה ל${w === 'your comment' ? 'תגובה שלך' : w === 'your story' ? 'סטורי שלך' : w}`],
+  [/^Sharing failed \((\w+)\): (.*)$/s, 'השיתוף נכשל ($1): $2'], [/^Preparing photo (\d+)\/(\d+)$/, 'מכינים תמונה $1/$2'],  [/^Could not prepare the file \((\w+)\): (.*)$/, 'לא הצלחנו להכין את הקובץ ($1): $2'], [/^Blurred (\d+) faces?$/, 'טושטשו $1 פנים'], [/^Stitching (\d+)\/(\d+)$/, 'מחברים $1/$2'], [/^Tap the spot for (.+)$/, (m, w) => `לבחור נקודה ל${w === 'your comment' ? 'תגובה שלך' : w === 'your story' ? 'סטורי שלך' : w}`],
   [/^Welcome, (.+) ✨$/, 'ברוכים הבאים, $1 ✨'], [/^You stepped through to (.+)$/, 'עברת ל$1'], [/^Delete “(.+)”\?$/, 'למחוק את “$1”?'],
   [/^(\d+) comments?$/, '$1 תגובות'], [/^(\d+) stor(y|ies)$/, '$1 סטוריז'], [/^(\d+) visits?$/, '$1 ביקורים'],
 ];
