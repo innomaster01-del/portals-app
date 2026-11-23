@@ -2369,13 +2369,12 @@ function denseFields(lows, Ws, h0) {
       m /= n; let va = 0; for (let k = 0; k < n; k++) { pa[k] -= m; va += pa[k] * pa[k]; }
       if (va / n < 40) continue;                          // plain wall: nothing to measure
       const ncc = (sx, sy, sub) => {
-        let s1 = 0, s2 = 0, sab = 0, c = 0;
+        let s1 = 0, s2 = 0, sab = 0, sa = 0, saa = 0, c = 0;
         for (let dy = -R; dy <= R; dy += sub) for (let dx = -R; dx <= R; dx += sub) {
           const ib = idx(B, X + dx + sx, Y + dy + sy); if (ib < 0 || !LB.ok[ib]) return -1;
-          const b = LB.l[ib], a = pa[(dy + R) * (2 * R + 1) + dx + R]; s1 += b; s2 += b * b; sab += a * b; c++;
+          const b = LB.l[ib], a = pa[(dy + R) * (2 * R + 1) + dx + R]; s1 += b; s2 += b * b; sab += a * b; sa += a; saa += a * a; c++;
         }
-        const mb = s1 / c, vb = s2 / c - mb * mb; if (vb < 4) return -1;
-        return (sab / c) / Math.sqrt(vb * (va / n));
+        return nccOf(s1, s2, sab, sa, saa, c);
       };
       let best = -1, bx = 0, by = 0; const all = [];
       for (let sy = -SR; sy <= SR; sy += 2) for (let sx = -SR; sx <= SR; sx += 2) { const c = ncc(sx, sy, 2); all.push(c, sx, sy); if (c > best) { best = c; bx = sx; by = sy; } }
@@ -2429,9 +2428,9 @@ function directAlign(shots, Rs, h0, placed) {
           if (!ok) continue;
           m /= n; let va = 0; for (let k = 0; k < n; k++) { pa[k] -= m; va += pa[k] * pa[k]; } if (va / n < 30) continue;
           if (idx(N, X, Y) < 0) continue;
-          const ncc = (sx, sy, sub) => { let s1 = 0, s2 = 0, sab = 0, c = 0;
-            for (let dy = -R; dy <= R; dy += sub) for (let dx = -R; dx <= R; dx += sub) { const k = idx(N, X + dx + sx, Y + dy + sy); if (k < 0 || !N.ok[k]) return -1; const b = N.l[k]; s1 += b; s2 += b * b; sab += pa[(dy + R) * (2 * R + 1) + dx + R] * b; c++; }
-            const mb = s1 / c, vb = s2 / c - mb * mb; return vb < 4 ? -1 : (sab / c) / Math.sqrt(vb * (va / n)); };
+          const ncc = (sx, sy, sub) => { let s1 = 0, s2 = 0, sab = 0, sa = 0, saa = 0, c = 0;
+            for (let dy = -R; dy <= R; dy += sub) for (let dx = -R; dx <= R; dx += sub) { const k = idx(N, X + dx + sx, Y + dy + sy); if (k < 0 || !N.ok[k]) return -1; const b = N.l[k], a = pa[(dy + R) * (2 * R + 1) + dx + R]; s1 += b; s2 += b * b; sab += a * b; sa += a; saa += a * a; c++; }
+            return nccOf(s1, s2, sab, sa, saa, c); };
           let best = -1, bx = 0, by = 0; const all = [];
           for (let sy = -SR; sy <= SR; sy += 2) for (let sx = -SR; sx <= SR; sx += 2) { const c = ncc(sx, sy, 2); all.push(c, sx, sy); if (c > best) { best = c; bx = sx; by = sy; } }
           if (best < .6) continue;
@@ -2464,6 +2463,76 @@ function directAlign(shots, Rs, h0, placed) {
     }
   }
   return { Rs: out, report, placedOk };
+}
+// Two neighbouring photos whose corners did not match (a close fence with repeating boards, leaves,
+// strong parallax) leave the circle open, and then their meeting point depends on the compass alone: a
+// visible break. As in patch-based alignment (Szeliski) and the optical-flow joining of the first and last
+// photo used by panorama apps, the pictures themselves are compared there: patches of one photo searched
+// for in the other over a wide window (coarse, then fine after a first rotation estimate). The result is a
+// set of point pairs in each photo's own pixels, used by the bundle adjustment like ordinary matches.
+function bridgePair(shots, F, a, b, Ra, Rb, h0, fov, K) {
+  const fit = (A, B) => { // rotation moving directions A onto B, dropping points that disagree
+    const skew = (v) => [0, -v[2], v[1], v[2], 0, -v[0], -v[1], v[0], 0]; let Rc = [1, 0, 0, 0, 1, 0, 0, 0, 1], keep = A.map(() => true);
+    for (let it = 0; it < 8; it++) {
+      const M = [0, 0, 0, 0, 0, 0, 0, 0, 0], g = [0, 0, 0]; let cnt = 0;
+      A.forEach((a0, k) => { if (!keep[k]) return; const q = mat3v(Rc, a0), r = [B[k][0] - q[0], B[k][1] - q[1], B[k][2] - q[2]], S = skew(q);
+        for (let p = 0; p < 3; p++) { for (let t = 0; t < 3; t++) M[p * 3 + t] += S[p] * S[t] + S[3 + p] * S[3 + t] + S[6 + p] * S[6 + t]; g[p] -= S[p] * r[0] + S[3 + p] * r[1] + S[6 + p] * r[2]; } cnt++; });
+      if (cnt < 10) return null;
+      const w = solveLinear([[M[0], M[1], M[2]], [M[3], M[4], M[5]], [M[6], M[7], M[8]]], g); if (!w) return null;
+      Rc = mat3m(expRot(w), Rc);
+      const res = A.map((a0, k) => Math.acos(Math.min(1, dot3(mat3v(Rc, a0), B[k]))) / DEG), med = res.slice().sort((x, y) => x - y)[res.length >> 1];
+      keep = res.map((r) => r < Math.max(.8, med * 2.5));
+    }
+    return { Rc, keep };
+  };
+  const search = (Rb2, Ws, SR, R, step, cstep) => {
+    const Hs = Ws / 2, mod = (v) => ((v % Ws) + Ws) % Ws;
+    const low = (i, Rr) => { const w = warpShot(shots[i].small, Rr, h0, fov, Ws, K); if (!w) return null; const d = w.c.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w.w, w.h).data; free(w.c);
+      const l = new Float32Array(w.w * w.h), ok = new Uint8Array(w.w * w.h); for (let k = 0; k < l.length; k++) { l[k] = d[k * 4] * .3 + d[k * 4 + 1] * .59 + d[k * 4 + 2] * .11; ok[k] = d[k * 4 + 3] > 220; } return { ...w, l, ok }; };
+    const U = low(a, Ra), N = low(b, Rb2); if (!U || !N) return [];
+    const idx = (Z, X, Y) => { if (Y < Z.y0 || Y >= Z.y0 + Z.h) return -1; const dx = mod(X - Z.x0); return dx < Z.w ? (Y - Z.y0) * Z.w + dx : -1; };
+    const vec = (X, Y) => { const hd = (h0 + ((X + .5) / Ws - .75) * 360) * DEG, lat = (.5 - (Y + .5) / Hs) * Math.PI; return [Math.cos(lat) * Math.sin(hd), Math.cos(lat) * Math.cos(hd), Math.sin(lat)]; };
+    const out = [], pa = new Float32Array((2 * R + 1) ** 2);
+    const st = [0, 0, 0, 0, 0, 0];     for (let Y = Math.max(U.y0, Math.round(Hs * .12)) + R; Y < Math.min(U.y0 + U.h, Math.round(Hs * .88)) - R; Y += step) for (let u0 = R; u0 < Math.min(U.w, Ws) - R; u0 += step) {
+      const X = U.x0 + u0; st[0]++; if (idx(N, X, Y) < 0) continue; st[1]++;
+      let ok = true, m = 0, n = 0;
+      for (let dy = -R; dy <= R && ok; dy++) for (let dx = -R; dx <= R; dx++) { const k = idx(U, X + dx, Y + dy); if (k < 0 || !U.ok[k]) { ok = false; break; } pa[n++] = U.l[k]; m += U.l[k]; }
+      if (!ok) continue; st[2]++;
+      m /= n; let va = 0; for (let k = 0; k < n; k++) { pa[k] -= m; va += pa[k] * pa[k]; } if (va / n < 40) continue; st[3]++;
+      const ncc = (sx, sy, sub) => { let s1 = 0, s2 = 0, sab = 0, sa = 0, saa = 0, c = 0;
+        for (let dy = -R; dy <= R; dy += sub) for (let dx = -R; dx <= R; dx += sub) { const k = idx(N, X + dx + sx, Y + dy + sy); if (k < 0 || !N.ok[k]) return -1; const v = N.l[k], a = pa[(dy + R) * (2 * R + 1) + dx + R]; s1 += v; s2 += v * v; sab += a * v; sa += a; saa += a * a; c++; }
+        return nccOf(s1, s2, sab, sa, saa, c); };
+      let best = -1, bx = 0, by = 0; const all = [];
+      for (let sy = -SR; sy <= SR; sy += cstep) for (let sx = -SR; sx <= SR; sx += cstep) { const c = ncc(sx, sy, 2); all.push(c, sx, sy); if (c > best) { best = c; bx = sx; by = sy; } }
+      if (best < .6) continue; st[4]++;
+      let second = -1; for (let k = 0; k < all.length; k += 3) if ((Math.abs(all[k + 1] - bx) > cstep * 4 || Math.abs(all[k + 2] - by) > cstep * 4) && all[k] > second) second = all[k];
+            if (best - second < .05) continue; st[5]++;
+      const cx = bx, cy = by; best = -1; for (let sy = cy - cstep; sy <= cy + cstep; sy++) for (let sx = cx - cstep; sx <= cx + cstep; sx++) { const c = ncc(sx, sy, 1); if (c > best) { best = c; bx = sx; by = sy; } }
+      if (best < .75) continue;
+      out.push([vec(X, Y), vec(X + bx, Y + by)]);
+    }
+    return out;
+  };
+  // 1. wide look (about +-20 degrees) for a first rotation between the two photos
+  const c1 = search(Rb, 512, 28, 6, 5, 3); if (c1.length < 12) return null;
+  const f1 = fit(c1.map((x) => x[0]), c1.map((x) => x[1])); if (!f1 || f1.keep.filter(Boolean).length < 10) return null;
+  // 2. photo b turned by that rotation, then a fine look (+-3 degrees) at double resolution
+  const T3 = (M) => [M[0], M[3], M[6], M[1], M[4], M[7], M[2], M[5], M[8]], Rb2 = mat3m(T3(f1.Rc), Rb);
+    const c2 = search(Rb2, 1024, 8, 7, 8, 2); if (c2.length < 12) return null;
+  const f2 = fit(c2.map((x) => x[0]), c2.map((x) => x[1])); if (!f2) return null;
+  // point pairs in each photo's own pixels
+  const A = F[a], B = F[b], fa = focalOf(A.w, A.h, fov), fb = focalOf(B.w, B.h, fov);
+  const proj = (R, w, Z, f) => { const dx = R[0] * w[0] + R[3] * w[1] + R[6] * w[2], dy = R[1] * w[0] + R[4] * w[1] + R[7] * w[2], dz = -(R[2] * w[0] + R[5] * w[1] + R[8] * w[2]);
+    if (dz <= 0) return null; const xn = dx / dz, yn = dy / dz, sk = 1 + K * (xn * xn + yn * yn), u = Z.w / 2 + f * xn * sk, v = Z.h / 2 - f * yn * sk; return u >= 0 && v >= 0 && u < Z.w && v < Z.h ? [u, v] : null; };
+  const pts = [];
+  c2.forEach(([wa, wb], k) => { if (!f2.keep[k]) return; const pa = proj(Ra, wa, A, fa), pb = proj(Rb2, wb, B, fb); if (pa && pb) pts.push([pa, pb]); });
+  return pts.length >= 10 ? pts : null;
+}
+// normalised cross-correlation from running sums (a: the patch, b: the place searched), exact also when
+// only every second pixel is used
+function nccOf(s1, s2, sab, sa, saa, c) {
+  const mb = s1 / c, ma = sa / c, vb = s2 / c - mb * mb, va = saa / c - ma * ma;
+  return vb < 4 || va < 4 ? -1 : (sab / c - ma * mb) / Math.sqrt(va * vb);
 }
 function solveLinear(H, g) {   // Gaussian elimination with partial pivoting; H is n x n (array of rows), solves H x = g
   const n = g.length, M = H.map((r, i) => [...r, g[i]]);
@@ -2744,6 +2813,22 @@ async function stitchAll(rawAll, h0) {
       const closed = hzI.length >= 6 && hzI.every((x, k) => has(x, hzI[(k + 1) % hzI.length]));
       const known = store.get(lensKey('fovOk'), false) && store.get(lensKey('fov'), 0);
       if (!closed && known) LONG_FOV = known;
+      // neighbours in the same row whose corners did not match: join them by comparing the pictures
+      const bridged = [];
+      for (const r of new Set(shots.map((s) => s.row))) {
+        const ring = shots.map((s, i) => i).filter((i) => shots[i].row === r && linked.has(i)); if (ring.length < 3) continue;
+        for (let k = 0; k < ring.length; k++) {
+          const x = ring[k], y = ring[(k + 1) % ring.length]; if (has(x, y)) continue;
+                    if (dot3(fwdOf(start[x]), fwdOf(start[y])) < Math.cos(60 * DEG)) continue;
+          $('stitchText').textContent = 'Joining photos with few matching details'; await nextFrame();
+          const pp = bridgePair(shots, F, x, y, start[x], start[y], h0, LONG_FOV, LENS_K1); if (!pp) continue;
+          const ext = (Z, add) => { const n0 = Z.n, P = new Float32Array((n0 + add.length) * 2); P.set(Z.pts.subarray(0, n0 * 2)); add.forEach((q, i) => { P[(n0 + i) * 2] = q[0]; P[(n0 + i) * 2 + 1] = q[1]; }); return { ...Z, pts: P, n: n0 + add.length, n0 }; };
+          const na = F[x].n, nb = F[y].n;
+          F[x] = ext(F[x], pp.map((q) => q[0])); F[y] = ext(F[y], pp.map((q) => q[1]));
+          pairs.push({ a: x, b: y, m: pp.map((q, i) => [na + i, nb + i]), Q: null, bridge: true }); bridged.push([x, y, pp.length]);
+        }
+      }
+      window.__engine.bridged = bridged;
       let ba = bundleAdjust(F, start, pairs, LONG_FOV, !closed, LENS_K1);
       // a pair of photos matched by mistake (repeating patterns: fence boards, tiles) pulls a photo off;
       // such a pair disagrees with everything else after the first solve, so it is dropped and the solve repeated
@@ -2751,7 +2836,13 @@ async function stitchAll(rawAll, h0) {
         const e = pr.m.map(([i, j]) => Math.acos(Math.min(1, dot3(norm3(mat3v(ba.Rs[pr.a], rayOf(A.pts[i * 2], A.pts[i * 2 + 1], A.w, A.h, fa, ba.k1))), norm3(mat3v(ba.Rs[pr.b], rayOf(B.pts[j * 2], B.pts[j * 2 + 1], B.w, B.h, fb, ba.k1)))))) / DEG).sort((x, y) => x - y);
         return e[e.length >> 1]; };
       const errs = pairs.map(pairErr), medAll = errs.slice().sort((x, y) => x - y)[errs.length >> 1] || 0;
-      const bad = pairs.filter((pr, k) => errs[k] > Math.max(1.5, medAll * 4));
+      // ...but never a pair that is the only link between two groups of photos: dropping that would leave
+      // the groups to the compass (in a real capture this split the circle into three and broke it)
+      const connectedWithout = (skip) => { const pr2 = shots.map((_, i) => i), fd = (i) => (pr2[i] === i ? i : (pr2[i] = fd(pr2[i])));
+        pairs.forEach((p) => { if (!skip.has(p)) pr2[fd(p.a)] = fd(p.b); }); const r0 = fd([...linked][0]); return [...linked].every((i) => fd(i) === r0); };
+      const bad = [];
+      pairs.map((pr, k) => [pr, errs[k]]).filter(([, e]) => e > Math.max(1.5, medAll * 4)).sort((x, y) => y[1] - x[1])
+        .forEach(([pr]) => { const trial = new Set([...bad, pr]); if (connectedWithout(trial)) bad.push(pr); });
       window.__engine.dropped = bad.map((pr) => [pr.a, pr.b, +errs[pairs.indexOf(pr)].toFixed(2)]);
       if (bad.length && bad.length < pairs.length / 4) {
         pairs.splice(0, pairs.length, ...pairs.filter((pr) => !bad.includes(pr)));
@@ -3119,9 +3210,13 @@ function fillGaps(c) {
   }
   const fc = canvas(w, h); fc.getContext('2d').putImageData(fill, 0, 0);
   const mc = canvas(w, h); mc.getContext('2d').putImageData(mask, 0, 0);
-  const p = c.getContext('2d'); p.globalCompositeOperation = 'destination-in'; p.imageSmoothingQuality = 'high'; p.drawImage(mc, 0, 0, W, H); p.globalCompositeOperation = 'source-over';
+  // the picture wraps around (left edge = right edge): give the small layers wrapped columns on both sides
+  // before scaling and blurring them, or a thin dark line appears where the two ends meet
+  const M = 3, wrapC = (src) => { const z = canvas(w + 2 * M, h), zx = z.getContext('2d'); zx.drawImage(src, M, 0); zx.drawImage(src, M - w, 0); zx.drawImage(src, M + w, 0); return z; };
+  const fcw = wrapC(fc), mcw = wrapC(mc), sxW = W / w;
+  const p = c.getContext('2d'); p.globalCompositeOperation = 'destination-in'; p.imageSmoothingQuality = 'high'; p.drawImage(mcw, -M * sxW, 0, W + 2 * M * sxW, H); p.globalCompositeOperation = 'source-over';
   const out = bigCanvas(W, H), o = out.getContext('2d');
-  o.imageSmoothingQuality = 'high'; o.filter = 'blur(6px)'; o.drawImage(fc, 0, 0, W, H); o.filter = 'none';
+  o.imageSmoothingQuality = 'high'; o.filter = 'blur(6px)'; o.drawImage(fcw, -M * sxW, 0, W + 2 * M * sxW, H); o.filter = 'none'; free(fcw, mcw);
   o.drawImage(c, 0, 0); free(c);
   // straight down is where you stood: a soft dark circle
   const g = o.createLinearGradient(0, H * .9, 0, H); g.addColorStop(0, 'rgba(4,5,11,0)'); g.addColorStop(.6, 'rgba(4,5,11,.7)'); g.addColorStop(1, 'rgba(4,5,11,.95)');
